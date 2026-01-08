@@ -2,6 +2,7 @@
 
 #include "file_identity.h"
 #include "file_neutralizer.h"
+#include "prevention_logger.h"
 #include <string>
 #include <vector>
 #include <chrono>

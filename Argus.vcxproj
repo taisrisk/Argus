@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
@@ -143,6 +143,7 @@
     <ClCompile Include="core\risk_engine.cpp" />
     <ClCompile Include="core\logger.cpp" />
     <ClCompile Include="platform\win32.cpp" />
+    <ClCompile Include="core\prevention_logger.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="core\credential_monitor.h" />
@@ -159,8 +160,6 @@
   <ItemGroup>
     <None Include=".gitignore" />
     <None Include="config\argus.json" />
-    <None Include="PHASE_2.7.1_COMPLETE.md" />
-    <None Include="PHASE_2.7_SUMMARY.md" />
     <None Include="README.md" />
     <None Include="run_argus.bat" />
   </ItemGroup>

@@ -66,11 +66,12 @@ bool CredentialMonitor::Initialize() {
     last_check_ = std::chrono::system_clock::now();
     
     file_identity_tracker_.Initialize();
+    PreventionLogger::Initialize();
     
     polling_thread_ = CreateThread(NULL, 0, PollingThread, this, 0, NULL);
     temp_watcher_thread_ = CreateThread(NULL, 0, TempFileWatcherThread, this, 0, NULL);
     
-    std::cout << "[CredentialMonitor] Real-time monitoring + identity tracking + temp file detection active" << std::endl;
+    std::cout << "[CredentialMonitor] Real-time monitoring + identity tracking + forensic logging active" << std::endl;
     
     return true;
 }
@@ -889,7 +890,7 @@ if (active_chains_.find(pid) == active_chains_.end()) {
     active_chains_[pid] = chain;
     is_new_threat = true;
         
-    std::cout << "\n!!! CREDENTIAL THEFT DETECTED !!!" << std::endl;
+    std::cout << "\n!!! CREDENTIAL THEFT ATTEMPT DETECTED !!!" << std::endl;
     std::cout << "========================================" << std::endl;
     std::cout << "  PID: " << pid << std::endl;
     std::cout << "  Process: " << event.process_path << std::endl;
@@ -951,12 +952,8 @@ if (active_chains_.find(pid) == active_chains_.end()) {
     std::cout << ")" << std::endl;
     
     if (lower_narrow.find("cookies-journal") != std::string::npos) {
-        std::cout << "  Info: Cookies-journal access (auth request logging)" << std::endl;
-        std::cout << "  Action: Monitoring - LOW risk" << std::endl;
         if (is_new_threat) {
             std::cout << "========================================\n" << std::endl;
-        } else {
-            std::cout << std::endl;
         }
         return;
     }
@@ -964,62 +961,76 @@ if (active_chains_.find(pid) == active_chains_.end()) {
     if (event.asset_type == AssetType::LoginData) {
         std::cout << "========================================" << std::endl;
         std::cout << ">>> CRITICAL: PASSWORD FILE ACCESSED" << std::endl;
-        std::cout << ">>> TERMINATING IMMEDIATELY" << std::endl;
+        
+        std::vector<std::string> accessed_files = {filepath_narrow};
+        std::vector<std::string> neutralized_files;
         
         ProcessActivity* activity = file_identity_tracker_.GetProcessActivity(pid);
         if (activity) {
             for (const auto& temp_file : activity->temp_db_files) {
                 FileNeutralizer::NeutralizeFile(temp_file);
+                neutralized_files.push_back(temp_file);
             }
             for (const auto& file_write : activity->file_writes) {
                 std::string lower = file_write;
                 std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
                 if (lower.find(".db") != std::string::npos || lower.find(".sqlite") != std::string::npos) {
                     FileNeutralizer::NeutralizeFile(file_write);
+                    neutralized_files.push_back(file_write);
                 }
             }
         }
         
+        std::string event_id = PreventionLogger::LogPrevention(
+            pid, event.process_path, "SQLITE_CREDENTIAL_EXTRACTION", accessed_files, neutralized_files);
+        
         if (KillProcess(pid)) {
-            std::cout << ">>> SUCCESS: Process terminated (PID: " << pid << ")" << std::endl;
-            std::cout << "  [WAITING] Checking for staged files in 2 seconds..." << std::endl;
-            FileNeutralizer::DelayedScanAndNeutralize(pid, event.process_path, 2000);
-        } else {
-            std::cout << ">>> FAILURE: Could not terminate" << std::endl;
+            std::cout << ">>> SUCCESS: Process terminated" << std::endl;
+            FileNeutralizer::ContinuousScanAndNeutralize(pid, event.process_path, event_id, 3000);
+            FileNeutralizer::DeepScanAndNeutralize(pid, event.process_path, event_id);
         }
-        std::cout << "========================================\n" << std::endl;
+        
+        PreventionLogger::DisplayPreventionCertificate(event_id);
         return;
     }
     
     if (event.asset_type == AssetType::LocalState) {
         std::cout << "========================================" << std::endl;
         std::cout << ">>> CRITICAL: MASTER KEY ACCESSED" << std::endl;
-        std::cout << ">>> TERMINATING IMMEDIATELY" << std::endl;
+        
+        std::vector<std::string> accessed_files = {filepath_narrow};
+        std::vector<std::string> neutralized_files;
+        
+        std::string event_id = PreventionLogger::LogPrevention(
+            pid, event.process_path, "MASTER_KEY_EXTRACTION", accessed_files, neutralized_files);
         
         if (KillProcess(pid)) {
-            std::cout << ">>> SUCCESS: Process terminated (PID: " << pid << ")" << std::endl;
-            std::cout << "  [WAITING] Checking for staged files in 2 seconds..." << std::endl;
-            FileNeutralizer::DelayedScanAndNeutralize(pid, event.process_path, 2000);
-        } else {
-            std::cout << ">>> FAILURE: Termination denied" << std::endl;
+            std::cout << ">>> SUCCESS: Process terminated" << std::endl;
+            FileNeutralizer::ContinuousScanAndNeutralize(pid, event.process_path, event_id, 3000);
+            FileNeutralizer::DeepScanAndNeutralize(pid, event.process_path, event_id);
         }
-        std::cout << "========================================\n" << std::endl;
+        
+        PreventionLogger::DisplayPreventionCertificate(event_id);
         return;
     }
     
-    if (event.asset_type == AssetType::Cookies) {
+    if (event.asset_type == AssetType::Cookies && active_chains_[pid].risk_score >= 10) {
         std::cout << "========================================" << std::endl;
-        std::cout << ">>> CRITICAL: SESSION COOKIES ACCESSED" << std::endl;
-        std::cout << ">>> TERMINATING IMMEDIATELY" << std::endl;
+        std::cout << ">>> CRITICAL: SUSPICIOUS COOKIE ACCESS" << std::endl;
+        
+        std::vector<std::string> accessed_files = {filepath_narrow};
+        std::vector<std::string> neutralized_files;
+        
+        std::string event_id = PreventionLogger::LogPrevention(
+            pid, event.process_path, "COOKIE_EXTRACTION", accessed_files, neutralized_files);
         
         if (KillProcess(pid)) {
-            std::cout << ">>> SUCCESS: Process terminated (PID: " << pid << ")" << std::endl;
-            std::cout << "  [WAITING] Checking for staged files in 2 seconds..." << std::endl;
-            FileNeutralizer::DelayedScanAndNeutralize(pid, event.process_path, 2000);
-        } else {
-            std::cout << ">>> FAILURE: Could not terminate" << std::endl;
+            std::cout << ">>> SUCCESS: Process terminated" << std::endl;
+            FileNeutralizer::ContinuousScanAndNeutralize(pid, event.process_path, event_id, 3000);
+            FileNeutralizer::DeepScanAndNeutralize(pid, event.process_path, event_id);
         }
-        std::cout << "========================================\n" << std::endl;
+        
+        PreventionLogger::DisplayPreventionCertificate(event_id);
         return;
     }
     

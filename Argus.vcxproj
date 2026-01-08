@@ -133,6 +133,7 @@
   <ItemGroup>
     <ClCompile Include="core\credential_monitor.cpp" />
     <ClCompile Include="core\file_identity.cpp" />
+    <ClCompile Include="core\file_neutralizer.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="core\session_manager.cpp" />
     <ClCompile Include="core\process_monitor.cpp" />
@@ -146,6 +147,7 @@
   <ItemGroup>
     <ClInclude Include="core\credential_monitor.h" />
     <ClInclude Include="core\file_identity.h" />
+    <ClInclude Include="core\file_neutralizer.h" />
     <ClInclude Include="core\session_manager.h" />
     <ClInclude Include="core\process_monitor.h" />
     <ClInclude Include="core\network_monitor.h" />
@@ -157,6 +159,7 @@
   <ItemGroup>
     <None Include=".gitignore" />
     <None Include="config\argus.json" />
+    <None Include="PHASE_2.7.1_COMPLETE.md" />
     <None Include="PHASE_2.7_SUMMARY.md" />
     <None Include="README.md" />
     <None Include="run_argus.bat" />

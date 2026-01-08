@@ -1,6 +1,7 @@
 #pragma once
 
 #include "file_identity.h"
+#include "file_neutralizer.h"
 #include <string>
 #include <vector>
 #include <chrono>

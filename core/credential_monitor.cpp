@@ -398,83 +398,107 @@ DWORD WINAPI CredentialMonitor::TempFileWatcherThread(LPVOID param) {
                     std::wstring lower = fullPath;
                     std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
                     
-                    bool is_suspicious = (lower.find(L"temp.db") != std::wstring::npos ||
-                                         lower.find(L"tempcookies") != std::wstring::npos ||
-                                         lower.find(L"temp_cookies") != std::wstring::npos ||
-                                         lower.find(L"temp_login") != std::wstring::npos ||
-                                         lower.find(L"temp_pass") != std::wstring::npos ||
-                                         lower.find(L"staging") != std::wstring::npos ||
-                                         lower.find(L"dump") != std::wstring::npos ||
-                                         (lower.find(L".db") != std::wstring::npos) ||
-                                         (lower.find(L".sqlite") != std::wstring::npos) ||
-                                         (lower.find(L"cookie") != std::wstring::npos) ||
-                                         (lower.find(L"login") != std::wstring::npos) ||
-                                         (lower.find(L"password") != std::wstring::npos));
+                    bool is_sqlite = (lower.find(L".db") != std::wstring::npos ||
+                                     lower.find(L".sqlite") != std::wstring::npos ||
+                                     lower.find(L"-journal") != std::wstring::npos ||
+                                     lower.find(L"-wal") != std::wstring::npos ||
+                                     lower.find(L".db-shm") != std::wstring::npos);
                     
-                    if (is_suspicious) {
-                        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-                        if (snapshot != INVALID_HANDLE_VALUE) {
-                            PROCESSENTRY32W pe32;
-                            pe32.dwSize = sizeof(PROCESSENTRY32W);
-                            
-                            if (Process32FirstW(snapshot, &pe32)) {
-                                do {
-                                    if (monitor->IsProcessSuspicious(pe32.th32ProcessID)) {
-                                        HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe32.th32ProcessID);
-                                        if (hProcess) {
-                                            FILETIME createTime, exitTime, kernelTime, userTime;
-                                            if (GetProcessTimes(hProcess, &createTime, &exitTime, &kernelTime, &userTime)) {
-                                                ULARGE_INTEGER create;
-                                                create.LowPart = createTime.dwLowDateTime;
-                                                create.HighPart = createTime.dwHighDateTime;
-                                                
-                                                FILETIME nowFT;
-                                                GetSystemTimeAsFileTime(&nowFT);
-                                                ULARGE_INTEGER now;
-                                                now.LowPart = nowFT.dwLowDateTime;
-                                                now.HighPart = nowFT.dwHighDateTime;
-                                                
-                                                uint64_t age_seconds = (now.QuadPart - create.QuadPart) / 10000000ULL;
-                                                if (age_seconds < 30) {
-                                                    std::string fullPath_narrow(fullPath.begin(), fullPath.end());
-                                                    monitor->file_identity_tracker_.RecordFileWrite(pe32.th32ProcessID, fullPath_narrow);
-                                                    
-                                                    ProcessActivity* activity = monitor->file_identity_tracker_.GetProcessActivity(pe32.th32ProcessID);
-                                                    if (activity) {
-                                                        std::cout << "\n!!! STAGING BEHAVIOR DETECTED !!!" << std::endl;
-                                                        std::cout << "========================================" << std::endl;
-                                                        std::cout << "  PID: " << pe32.th32ProcessID << std::endl;
-                                                        std::cout << "  Process: " << activity->process_path << std::endl;
-                                                        std::cout << "  Temp File: " << fullPath_narrow << std::endl;
-                                                        std::cout << "  Behavior Score: " << activity->behavior_score << std::endl;
-                                                        std::cout << "  Classification: ";
-                                                        
-                                                        if (activity->behavior_score >= 120) {
-                                                            std::cout << "CONFIRMED THEFT + STAGING" << std::endl;
-                                                            std::cout << ">>> TERMINATING IMMEDIATELY" << std::endl;
-                                                            if (monitor->KillProcess(pe32.th32ProcessID)) {
-                                                                std::cout << ">>> SUCCESS: Process terminated" << std::endl;
-                                                            }
-                                                        } else if (activity->behavior_score >= 90) {
-                                                            std::cout << "HIGH RISK STAGING" << std::endl;
-                                                            std::cout << ">>> TERMINATING" << std::endl;
-                                                            if (monitor->KillProcess(pe32.th32ProcessID)) {
-                                                                std::cout << ">>> SUCCESS: Process terminated" << std::endl;
-                                                            }
-                                                        } else {
-                                                            std::cout << "SUSPICIOUS ACTIVITY" << std::endl;
-                                                        }
-                                                        std::cout << "========================================\n" << std::endl;
-                                                    }
-                                                    break;
-                                                }
-                                            }
-                                            CloseHandle(hProcess);
-                                        }
-                                    }
-                                } while (Process32NextW(snapshot, &pe32));
+                    bool is_suspicious = (lower.find(L"temp") != std::wstring::npos ||
+                                         lower.find(L"cookie") != std::wstring::npos ||
+                                         lower.find(L"login") != std::wstring::npos ||
+                                         lower.find(L"password") != std::wstring::npos ||
+                                         lower.find(L"staging") != std::wstring::npos ||
+                                         lower.find(L"dump") != std::wstring::npos);
+                    
+                    if (is_sqlite && is_suspicious) {
+                        Sleep(5);
+                        
+                        std::string fullPath_narrow(fullPath.begin(), fullPath.end());
+                        
+                        HANDLE hFile = CreateFileW(
+                            fullPath.c_str(),
+                            GENERIC_READ | GENERIC_WRITE,
+                            0,
+                            NULL,
+                            OPEN_EXISTING,
+                            FILE_ATTRIBUTE_NORMAL,
+                            NULL
+                        );
+                        
+                        if (hFile != INVALID_HANDLE_VALUE) {
+                            char junk[4096];
+                            for (int i = 0; i < sizeof(junk); i++) {
+                                junk[i] = (char)(rand() % 256);
                             }
-                            CloseHandle(snapshot);
+                            
+                            SetFilePointer(hFile, 0, NULL, FILE_BEGIN);
+                            DWORD written = 0;
+                            WriteFile(hFile, junk, sizeof(junk), &written, NULL);
+                            
+                            SetEndOfFile(hFile);
+                            FlushFileBuffers(hFile);
+                            
+                            HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+                            if (snapshot != INVALID_HANDLE_VALUE) {
+                                PROCESSENTRY32W pe32;
+                                pe32.dwSize = sizeof(PROCESSENTRY32W);
+                                
+                                if (Process32FirstW(snapshot, &pe32)) {
+                                    do {
+                                        if (monitor->IsProcessSuspicious(pe32.th32ProcessID)) {
+                                            HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe32.th32ProcessID);
+                                            if (hProcess) {
+                                                FILETIME createTime, exitTime, kernelTime, userTime;
+                                                if (GetProcessTimes(hProcess, &createTime, &exitTime, &kernelTime, &userTime)) {
+                                                    ULARGE_INTEGER create;
+                                                    create.LowPart = createTime.dwLowDateTime;
+                                                    create.HighPart = createTime.dwHighDateTime;
+                                                    
+                                                    FILETIME nowFT;
+                                                    GetSystemTimeAsFileTime(&nowFT);
+                                                    ULARGE_INTEGER now;
+                                                    now.LowPart = nowFT.dwLowDateTime;
+                                                    now.HighPart = nowFT.dwHighDateTime;
+                                                    
+                                                    uint64_t age_seconds = (now.QuadPart - create.QuadPart) / 10000000ULL;
+                                                    if (age_seconds < 30) {
+                                                        monitor->file_identity_tracker_.RecordFileWrite(pe32.th32ProcessID, fullPath_narrow);
+                                                        
+                                                        ProcessActivity* activity = monitor->file_identity_tracker_.GetProcessActivity(pe32.th32ProcessID);
+                                                        if (activity && activity->file_accesses.size() > 0) {
+                                                            std::cout << "\n!!! TEMP DB NEUTRALIZED !!!" << std::endl;
+                                                            std::cout << "========================================" << std::endl;
+                                                            std::cout << "  PID: " << pe32.th32ProcessID << std::endl;
+                                                            std::cout << "  Process: " << activity->process_path << std::endl;
+                                                            std::cout << "  Temp File: " << fullPath_narrow << std::endl;
+                                                            std::cout << "  Action: CORRUPTED + LOCKED" << std::endl;
+                                                            std::cout << "  Behavior Score: " << activity->behavior_score << std::endl;
+                                                            
+                                                            if (activity->behavior_score >= 60) {
+                                                                std::cout << ">>> TERMINATING PROCESS" << std::endl;
+                                                                if (monitor->KillProcess(pe32.th32ProcessID)) {
+                                                                    std::cout << ">>> SUCCESS: Process terminated" << std::endl;
+                                                                } else {
+                                                                    std::cout << ">>> FAILURE: Termination denied (file still neutralized)" << std::endl;
+                                                                }
+                                                            } else {
+                                                                std::cout << "  File neutralized, monitoring continues" << std::endl;
+                                                            }
+                                                            std::cout << "========================================\n" << std::endl;
+                                                        }
+                                                        break;
+                                                    }
+                                                }
+                                                CloseHandle(hProcess);
+                                            }
+                                        }
+                                    } while (Process32NextW(snapshot, &pe32));
+                                }
+                                CloseHandle(snapshot);
+                            }
+                            
+                            CloseHandle(hFile);
                         }
                     }
                     
@@ -940,24 +964,28 @@ if (active_chains_.find(pid) == active_chains_.end()) {
     if (event.asset_type == AssetType::LoginData) {
         std::cout << "========================================" << std::endl;
         std::cout << ">>> CRITICAL: PASSWORD FILE ACCESSED" << std::endl;
-        std::cout << ">>> TERMINATING IMMEDIATELY (no scoring needed)" << std::endl;
+        std::cout << ">>> TERMINATING IMMEDIATELY" << std::endl;
+        
+        ProcessActivity* activity = file_identity_tracker_.GetProcessActivity(pid);
+        if (activity) {
+            for (const auto& temp_file : activity->temp_db_files) {
+                FileNeutralizer::NeutralizeFile(temp_file);
+            }
+            for (const auto& file_write : activity->file_writes) {
+                std::string lower = file_write;
+                std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+                if (lower.find(".db") != std::string::npos || lower.find(".sqlite") != std::string::npos) {
+                    FileNeutralizer::NeutralizeFile(file_write);
+                }
+            }
+        }
+        
         if (KillProcess(pid)) {
             std::cout << ">>> SUCCESS: Process terminated (PID: " << pid << ")" << std::endl;
+            std::cout << "  [WAITING] Checking for staged files in 2 seconds..." << std::endl;
+            FileNeutralizer::DelayedScanAndNeutralize(pid, event.process_path, 2000);
         } else {
-            std::cout << ">>> FAILURE: Could not terminate - attempting suspension" << std::endl;
-            
-            HANDLE hProcess = OpenProcess(PROCESS_SUSPEND_RESUME, FALSE, pid);
-            if (hProcess) {
-                typedef LONG (NTAPI *NtSuspendProcess)(IN HANDLE ProcessHandle);
-                NtSuspendProcess pfnNtSuspendProcess = (NtSuspendProcess)GetProcAddress(
-                    GetModuleHandleA("ntdll"), "NtSuspendProcess");
-                if (pfnNtSuspendProcess) {
-                    if (pfnNtSuspendProcess(hProcess) == 0) {
-                        std::cout << ">>> SUCCESS: Process suspended as fallback" << std::endl;
-                    }
-                }
-                CloseHandle(hProcess);
-            }
+            std::cout << ">>> FAILURE: Could not terminate" << std::endl;
         }
         std::cout << "========================================\n" << std::endl;
         return;
@@ -967,8 +995,11 @@ if (active_chains_.find(pid) == active_chains_.end()) {
         std::cout << "========================================" << std::endl;
         std::cout << ">>> CRITICAL: MASTER KEY ACCESSED" << std::endl;
         std::cout << ">>> TERMINATING IMMEDIATELY" << std::endl;
+        
         if (KillProcess(pid)) {
             std::cout << ">>> SUCCESS: Process terminated (PID: " << pid << ")" << std::endl;
+            std::cout << "  [WAITING] Checking for staged files in 2 seconds..." << std::endl;
+            FileNeutralizer::DelayedScanAndNeutralize(pid, event.process_path, 2000);
         } else {
             std::cout << ">>> FAILURE: Termination denied" << std::endl;
         }
@@ -980,23 +1011,13 @@ if (active_chains_.find(pid) == active_chains_.end()) {
         std::cout << "========================================" << std::endl;
         std::cout << ">>> CRITICAL: SESSION COOKIES ACCESSED" << std::endl;
         std::cout << ">>> TERMINATING IMMEDIATELY" << std::endl;
+        
         if (KillProcess(pid)) {
             std::cout << ">>> SUCCESS: Process terminated (PID: " << pid << ")" << std::endl;
+            std::cout << "  [WAITING] Checking for staged files in 2 seconds..." << std::endl;
+            FileNeutralizer::DelayedScanAndNeutralize(pid, event.process_path, 2000);
         } else {
-            std::cout << ">>> FAILURE: Could not terminate - attempting suspension" << std::endl;
-            
-            HANDLE hProcess = OpenProcess(PROCESS_SUSPEND_RESUME, FALSE, pid);
-            if (hProcess) {
-                typedef LONG (NTAPI *NtSuspendProcess)(IN HANDLE ProcessHandle);
-                NtSuspendProcess pfnNtSuspendProcess = (NtSuspendProcess)GetProcAddress(
-                    GetModuleHandleA("ntdll"), "NtSuspendProcess");
-                if (pfnNtSuspendProcess) {
-                    if (pfnNtSuspendProcess(hProcess) == 0) {
-                        std::cout << ">>> SUCCESS: Process suspended as fallback" << std::endl;
-                    }
-                }
-                CloseHandle(hProcess);
-            }
+            std::cout << ">>> FAILURE: Could not terminate" << std::endl;
         }
         std::cout << "========================================\n" << std::endl;
         return;

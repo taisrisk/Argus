@@ -265,11 +265,11 @@ int FileIdentityTracker::CalculateBehaviorScore(uint32_t pid) {
     }
     
     if (activity.has_temp_staging) {
-        score += 50;
+        score += 60;
     }
     
     if (!activity.temp_db_files.empty()) {
-        score += 40;
+        score += 50;
     }
     
     if (!activity.network_connections.empty()) {
@@ -282,7 +282,7 @@ int FileIdentityTracker::CalculateBehaviorScore(uint32_t pid) {
     
     auto duration = std::chrono::duration_cast<std::chrono::seconds>(
         activity.last_activity - activity.first_seen).count();
-    if (duration <= 5 && unique_files >= 2) {
+    if (duration <= 5 && unique_files >= 1) {
         score += 20;
     }
     

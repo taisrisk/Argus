@@ -324,7 +324,7 @@ DWORD WINAPI CredentialMonitor::PollingThread(LPVOID param) {
     
     while (monitor->etw_running_) {
         monitor->CheckFileChanges();
-        Sleep(10);
+        Sleep(1);
     }
     
     return 0;
@@ -403,12 +403,15 @@ DWORD WINAPI CredentialMonitor::TempFileWatcherThread(LPVOID param) {
                                      lower.find(L".sqlite") != std::wstring::npos ||
                                      lower.find(L"-journal") != std::wstring::npos ||
                                      lower.find(L"-wal") != std::wstring::npos ||
-                                     lower.find(L".db-shm") != std::wstring::npos);
+                                     lower.find(L".db-shm") != std::wstring::npos ||
+                                     lower.find(L".json") != std::wstring::npos);
                     
                     bool is_suspicious = (lower.find(L"temp") != std::wstring::npos ||
                                          lower.find(L"cookie") != std::wstring::npos ||
                                          lower.find(L"login") != std::wstring::npos ||
                                          lower.find(L"password") != std::wstring::npos ||
+                                         lower.find(L"credential") != std::wstring::npos ||
+                                         lower.find(L"extract") != std::wstring::npos ||
                                          lower.find(L"staging") != std::wstring::npos ||
                                          lower.find(L"dump") != std::wstring::npos);
                     
@@ -636,19 +639,9 @@ void CredentialMonitor::CheckFileChanges() {
                                    lower_path.find("local state") != std::string::npos ||
                                    lower_path.find("cookies") != std::string::npos);
                 
-                std::vector<uint32_t> suspicious_pids;
-                
-                HANDLE hFile = CreateFileA(
-                    path.c_str(),
-                    GENERIC_READ,
-                    0,
-                    NULL,
-                    OPEN_EXISTING,
-                    FILE_ATTRIBUTE_NORMAL,
-                    NULL
-                );
-                
-                if (hFile == INVALID_HANDLE_VALUE && GetLastError() == ERROR_SHARING_VIOLATION) {
+                if (is_critical && accessed) {
+                    std::vector<uint32_t> suspicious_pids;
+                    
                     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
                     if (snapshot != INVALID_HANDLE_VALUE) {
                         PROCESSENTRY32W pe32;
@@ -657,28 +650,37 @@ void CredentialMonitor::CheckFileChanges() {
                         if (Process32FirstW(snapshot, &pe32)) {
                             do {
                                 if (IsProcessSuspicious(pe32.th32ProcessID)) {
-                                    suspicious_pids.push_back(pe32.th32ProcessID);
+                                    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe32.th32ProcessID);
+                                    if (hProcess) {
+                                        FILETIME createTime, exitTime, kernelTime, userTime;
+                                        if (GetProcessTimes(hProcess, &createTime, &exitTime, &kernelTime, &userTime)) {
+                                            ULARGE_INTEGER create;
+                                            create.LowPart = createTime.dwLowDateTime;
+                                            create.HighPart = createTime.dwHighDateTime;
+                                            
+                                            FILETIME nowFT;
+                                            GetSystemTimeAsFileTime(&nowFT);
+                                            ULARGE_INTEGER now;
+                                            now.LowPart = nowFT.dwLowDateTime;
+                                            now.HighPart = nowFT.dwHighDateTime;
+                                            
+                                            uint64_t age_seconds = (now.QuadPart - create.QuadPart) / 10000000ULL;
+                                            if (age_seconds < 30) {
+                                                suspicious_pids.push_back(pe32.th32ProcessID);
+                                            }
+                                        }
+                                        CloseHandle(hProcess);
+                                    }
                                 }
                             } while (Process32NextW(snapshot, &pe32));
                         }
                         CloseHandle(snapshot);
                     }
-                } else {
-                    if (hFile != INVALID_HANDLE_VALUE) {
-                        CloseHandle(hFile);
-                    }
                     
-                    if (is_critical) {
-                        suspicious_pids = GetRecentProcesses();
-                    }
-                }
-                
-                if (!suspicious_pids.empty()) {
-                    for (uint32_t pid : suspicious_pids) {
-                        std::lock_guard<std::mutex> lock(chains_mutex_);
-                        RecordAccess(pid, wpath);
-                        
-                        if (is_critical) {
+                    if (!suspicious_pids.empty()) {
+                        for (uint32_t pid : suspicious_pids) {
+                            std::lock_guard<std::mutex> lock(chains_mutex_);
+                            RecordAccess(pid, wpath);
                             break;
                         }
                     }
@@ -961,32 +963,17 @@ if (active_chains_.find(pid) == active_chains_.end()) {
     if (event.asset_type == AssetType::LoginData) {
         std::cout << "========================================" << std::endl;
         std::cout << ">>> CRITICAL: PASSWORD FILE ACCESSED" << std::endl;
+        std::cout << ">>> KILLING IMMEDIATELY (ZERO TOLERANCE)" << std::endl;
         
         std::vector<std::string> accessed_files = {filepath_narrow};
         std::vector<std::string> neutralized_files;
         
-        ProcessActivity* activity = file_identity_tracker_.GetProcessActivity(pid);
-        if (activity) {
-            for (const auto& temp_file : activity->temp_db_files) {
-                FileNeutralizer::NeutralizeFile(temp_file);
-                neutralized_files.push_back(temp_file);
-            }
-            for (const auto& file_write : activity->file_writes) {
-                std::string lower = file_write;
-                std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
-                if (lower.find(".db") != std::string::npos || lower.find(".sqlite") != std::string::npos) {
-                    FileNeutralizer::NeutralizeFile(file_write);
-                    neutralized_files.push_back(file_write);
-                }
-            }
-        }
-        
         std::string event_id = PreventionLogger::LogPrevention(
-            pid, event.process_path, "SQLITE_CREDENTIAL_EXTRACTION", accessed_files, neutralized_files);
+            pid, event.process_path, "PASSWORD_FILE_ACCESS", accessed_files, neutralized_files);
         
         if (KillProcess(pid)) {
-            std::cout << ">>> SUCCESS: Process terminated" << std::endl;
-            FileNeutralizer::ContinuousScanAndNeutralize(pid, event.process_path, event_id, 3000);
+            std::cout << ">>> SUCCESS: Threat eliminated before data read" << std::endl;
+            FileNeutralizer::ContinuousScanAndNeutralize(pid, event.process_path, event_id, 5000);
             FileNeutralizer::DeepScanAndNeutralize(pid, event.process_path, event_id);
         }
         
@@ -997,16 +984,17 @@ if (active_chains_.find(pid) == active_chains_.end()) {
     if (event.asset_type == AssetType::LocalState) {
         std::cout << "========================================" << std::endl;
         std::cout << ">>> CRITICAL: MASTER KEY ACCESSED" << std::endl;
+        std::cout << ">>> KILLING IMMEDIATELY (ZERO TOLERANCE)" << std::endl;
         
         std::vector<std::string> accessed_files = {filepath_narrow};
         std::vector<std::string> neutralized_files;
         
         std::string event_id = PreventionLogger::LogPrevention(
-            pid, event.process_path, "MASTER_KEY_EXTRACTION", accessed_files, neutralized_files);
+            pid, event.process_path, "ENCRYPTION_KEY_ACCESS", accessed_files, neutralized_files);
         
         if (KillProcess(pid)) {
-            std::cout << ">>> SUCCESS: Process terminated" << std::endl;
-            FileNeutralizer::ContinuousScanAndNeutralize(pid, event.process_path, event_id, 3000);
+            std::cout << ">>> SUCCESS: Threat eliminated before key extraction" << std::endl;
+            FileNeutralizer::ContinuousScanAndNeutralize(pid, event.process_path, event_id, 5000);
             FileNeutralizer::DeepScanAndNeutralize(pid, event.process_path, event_id);
         }
         

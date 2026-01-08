@@ -61,7 +61,6 @@ void FileNeutralizer::NeutralizeFile(const std::string& filepath) {
         SetEndOfFile(hFile);
         FlushFileBuffers(hFile);
         
-        std::cout << "  [NEUTRALIZED] " << filepath << std::endl;
         CloseHandle(hFile);
     }
 }

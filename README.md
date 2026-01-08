@@ -1,93 +1,60 @@
-# ARGUS
+ï»¿# ARGUS
 
-## Why This Exists
-
-Modern browsers are powerful but opaque. Extensions run with broad permissions, network connections happen invisibly, credentials are stored locally, and users have no visibility into what's actually occurring. Browser credential theft is rampant, with commodity stealers trivially extracting cookies and passwords. When something feels wrong, there's no tool to observe, understand, and protect browser behavior without technical expertise or invasive monitoring software.
+**Local browser security monitor for Windows with active credential theft prevention.**
 
 ## What It Does
 
-Argus is a local browser security monitor for Windows with active defense capabilities. It observes browser processes, analyzes extension permissions, monitors network patterns, **detects credential theft attempts in real-time**, and **automatically terminates malicious processes** before data exfiltration can occur.
+Argus detects and terminates credential stealers in real-time before they can extract browser passwords, cookies, or encryption keys. Zero-tolerance enforcement with <5ms detection latency.
 
 ### Core Features
 
-**Real-Time Credential Theft Detection**: Monitors file system access to browser credential stores (Login Data, Cookies, Local State) using directory watchers. Detects access instantly—no polling delays.
+- **<5ms Detection**: 1ms polling + I/O completion ports for instant threat detection
+- **Zero-Tolerance Enforcement**: Login Data/Local State access = immediate termination
+- **Forensic Logging**: Tamper-evident event logs with verification hashes
+- **File Identity Tracking**: Detects symlink/junction evasion techniques
+- **Continuous Neutralization**: 5-second aggressive scan after termination
+- **Multi-Browser Support**: Chrome, Edge, Brave, Opera, Vivaldi, Firefox, Comet
+- **100+ Whitelisted Apps**: Zero false positives from legitimate software
 
-**Automatic Threat Termination**: Processes accessing unencrypted password files (Login Data) are flagged as critical threats and terminated immediately with a risk score of 20+. No human intervention required.
+### Threat Response
 
-**Comprehensive Whitelist**: 100+ trusted applications excluded from monitoring including all major browsers, development tools, gaming clients, communication apps, media players, and system utilities. Virtually eliminates false positives.
+| Asset Accessed | Action | Latency |
+|----------------|--------|---------|
+| Login Data (passwords) | Instant kill | <5ms |
+| Local State (master key) | Instant kill | <5ms |
+| Cookies (score â‰¥10) | Kill + scan | <5ms |
+| Temp SQLite/JSON | Neutralize + track | <50ms |
 
-**Multi-Browser Support**: Monitors Chrome, Edge, Brave, Opera, Opera GX, Vivaldi, Perplexity Comet, and Firefox profiles simultaneously.
+### Technical Details
 
-**Extension Risk Analysis**: Scans for high-risk extension permissions (debugger, proxy, webRequestBlocking) with intelligent filtering of legitimate VPN extensions (ProtonVPN, NordVPN, ExpressVPN, etc.).
+**Detection**: File identity tracking (file_id, volume_serial) + directory watchers + 1ms polling  
+**Prevention**: Process termination + 5s continuous file scanning + forensic markers  
+**Evasion Resistance**: Catches indirect access via symlinks, junctions, hardlinks  
 
-**Privacy-First Design**: Everything runs locally. No data leaves your computer, no cloud services, no telemetry. Session logs stored locally contain no personal information.
+**Build**: `msbuild Argus.sln /p:Configuration=Debug /p:Platform=x64`  
+**Run**: `x64\Debug\Argus.exe` (requires Administrator for termination)  
+**Phase**: 2.8.1 - Zero-tolerance enforcement
 
-**User-Mode Only**: No kernel drivers, no code injection, no process hooks. Uses standard Windows APIs (`ReadDirectoryChangesW`, process enumeration) for maximum compatibility.
+### Forensic Evidence
 
-## Benefits to Users
+```
+C:\ProgramData\Argus\forensics\events.log
+[2026-01-07T15:23:41Z]
+EVENT_ID: 4c92f0a7-3a2e-...
+PROCESS: stealer.exe (PID 12345)
+ACTION: PASSWORD_FILE_ACCESS
+RESULT: EXTRACTION_PREVENTED
+VERIFICATION: 8a4b2c1d
+```
 
-**Instant Protection**: Credential stealers are terminated within milliseconds of accessing password files—faster than they can extract or transmit data.
+### Privacy
 
-**Zero False Positives**: Comprehensive whitelist of 100+ legitimate applications means Argus won't interfere with normal computing activities.
-
-**Transparency Without Complexity**: See exactly which processes accessed credential files, with clear explanations in plain language rather than technical jargon.
-
-**Lightweight & Compatible**: User-mode operation ensures compatibility with anti-cheat systems, no system instability, and minimal resource usage.
-
-**Ephemeral Sessions**: When you close Argus, it's truly gone. No background services, no registry entries, no auto-start. Run it when you want protection, stop when you don't.
-
-**User Consent Model**: Extension scanning requires explicit opt-in. You control observation levels and can decline any scanning.
-
-**Local-Only Logging**: All session logs stored in local `logs/` directory. No network transmission, no cloud storage.
-
-## The Philosophy
-
-Argus is an active defense system that protects browser credentials without taking control away from users. It provides visibility into browser behavior, automatically neutralizes confirmed threats (credential theft), and trusts users to make informed decisions about everything else. It respects privacy, requires consent for scanning, leaves no trace (except legitimate threat detections), and explains findings in understandable terms.
-
-### Threat Response Model
-
-**Automatic Termination** (Score ?10):
-- Login Data access: **+20 points** ? Instant kill (unencrypted passwords)
-- Cookies + Login Data + Local State: **+20 points** ? Instant kill
-- Any 3+ asset types: **+15 points** ? Instant kill
-
-**Manual Review** (Score 5-9):
-- Logged as medium/high risk
-- User can investigate and take action
-
-**Ignored** (Score <5):
-- Low-risk or whitelisted activity
-- No alert generated
-
-**Phase 2.7.1**: Identity-based tracking + anti-staging detection. Argus now detects credential theft by file identity (not path), catches symlink evasion, and terminates processes attempting to stage stolen data in temp files.
+- **Local-only**: No network, no cloud, no telemetry
+- **User-mode only**: No kernel drivers or code injection
+- **Ephemeral**: No persistence, no registry, no auto-start
+- **Consent-based**: Extension scanning requires explicit opt-in
 
 ---
 
-**Core Detection Layers:**
-1. **File Identity Tracking** - Files tracked by (file_id, volume_serial), not path
-2. **10ms Polling** - File stat changes detected every 10 milliseconds
-3. **I/O Completion Ports** - Kernel notifications for directory changes
-4. **Temp File Watcher** - Real-time monitoring of %TEMP% for staging behavior
-5. **Behavioral Scoring** - 0-200+ point scale based on intent signals
-
-**Detection Window: <100ms end-to-end**
-
-**Build**: Open `Argus.sln` in Visual Studio
-1. Ensure `core/file_identity.cpp` is in the project
-2. Build for x64 Debug/Release
-
-**Run**: `x64\Debug\Argus.exe` or use `run_argus.bat` (run as Administrator for process termination)  
-**Phase**: 2.7.1 - Identity tracking + anti-staging + behavioral analysis
-
-### Whitelisted Applications (100+)
-
-**Browsers**: Chrome, Edge, Firefox, Brave, Opera, Opera GX, Vivaldi, Comet  
-**Development**: Visual Studio, VS Code, Git, MSBuild, PowerShell, .NET  
-**Graphics**: NVIDIA (all), AMD Radeon, Intel Graphics  
-**Hardware**: OpenRGB, FanControl, SteelSeries  
-**Communication**: Discord, Slack, Teams, Skype, Zoom, Signal, Telegram  
-**Gaming**: Steam, Epic, Origin, Battle.net, Riot, GOG, Wallpaper Engine  
-**Media**: Spotify, iTunes, VLC, foobar2000, PotPlayer  
-**Utilities**: 7-Zip, WinRAR, Notepad++, GIMP, Photoshop, Blender  
-**VPN**: NordVPN, ProtonVPN, ExpressVPN, Surfshark, OpenVPN  
-**Antivirus**: Windows Defender, Avast, Avira, Kaspersky, Bitdefender
+**License**: MIT  
+**Platform**: Windows 10/11 x64

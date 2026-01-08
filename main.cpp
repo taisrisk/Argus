@@ -115,14 +115,17 @@ std::cout.flush();
     
     int cycle = 0;
     size_t last_assessment_count = 0;
-    auto last_extension_scan = std::chrono::steady_clock::now();
     
     std::cout << "Phase 2.5: Multi-browser + credential monitoring active" << std::endl;
     std::cout.flush();
     
+    auto last_extension_scan = std::chrono::steady_clock::now() - std::chrono::seconds(extension_scan_interval_seconds + 1);
+    
     while (g_running) {
         process_monitor.Update();
         credential_monitor.Update();
+        
+        credential_monitor.SetBrowserProcessIds(process_monitor.GetBrowserPids());
         
         if (process_monitor.IsBrowserActive()) {
             network_monitor.Update();
@@ -177,6 +180,10 @@ std::cout.flush();
                 }
                 
                 int total_profiles = 0;
+                int total_files_monitored = 0;
+                
+                std::cout << "\n=== Browser Discovery ===" << std::endl;
+                
                 for (const auto& browser : browsers) {
                     WIN32_FIND_DATAA find_data;
                     HANDLE hFind = FindFirstFileA((browser.path + "\\*").c_str(), &find_data);
@@ -185,19 +192,49 @@ std::cout.flush();
                         continue;
                     }
                     
-                    bool found_profiles = false;
+                    std::cout << "\n[" << browser.name << "]" << std::endl;
+                    
                     do {
                         if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
                             std::string dir_name = find_data.cFileName;
                             if (dir_name == "Default" || dir_name.find("Profile") == 0) {
-                                if (!found_profiles) {
-                                    std::cout << "[" << browser.id << "] " << browser.name << std::endl;
-                                    found_profiles = true;
-                                }
                                 std::string profile_path = browser.path + "\\" + dir_name;
-                                std::cout << "  Profile: " << dir_name << std::endl;
+                                
                                 extension_scanner.ScanExtensions(profile_path);
+                                auto status = credential_monitor.RegisterBrowserProfileWithStatus(browser.id, profile_path);
+                                
+                                std::string status_str;
+                                if (status.files_monitored == 0) {
+                                    status_str = "FAIL";
+                                } else if (status.missing_files.empty()) {
+                                    status_str = "OK";
+                                } else {
+                                    status_str = "PARTIAL";
+                                }
+                                
+                                std::cout << "  " << dir_name << ": " << status_str;
+                                std::cout << " (" << status.files_monitored << " files)" << std::endl;
+                                
+                                if (!status.monitored_files.empty() && status_str != "OK") {
+                                    std::cout << "    Monitoring: ";
+                                    for (size_t i = 0; i < status.monitored_files.size(); ++i) {
+                                        std::cout << status.monitored_files[i];
+                                        if (i < status.monitored_files.size() - 1) std::cout << ", ";
+                                    }
+                                    std::cout << std::endl;
+                                }
+                                
+                                if (!status.missing_files.empty()) {
+                                    std::cout << "    Missing: ";
+                                    for (size_t i = 0; i < status.missing_files.size(); ++i) {
+                                        std::cout << status.missing_files[i];
+                                        if (i < status.missing_files.size() - 1) std::cout << ", ";
+                                    }
+                                    std::cout << std::endl;
+                                }
+                                
                                 total_profiles++;
+                                total_files_monitored += status.files_monitored;
                             }
                         }
                     } while (FindNextFileA(hFind, &find_data));
@@ -205,21 +242,27 @@ std::cout.flush();
                     FindClose(hFind);
                 }
                 
-                auto findings = extension_scanner.GetFindings();
-                std::cout << "\nScanned " << total_profiles << " profiles across " << browsers.size() << " browsers" << std::endl;
+                std::cout << "\n=== Monitoring Summary ===" << std::endl;
+                std::cout << "Browsers: " << browsers.size() << std::endl;
+                std::cout << "Profiles: " << total_profiles << std::endl;
+                std::cout << "Files monitored: " << total_files_monitored << std::endl;
                 
-                if (findings.empty()) {
-                    std::cout << "No risky extensions detected" << std::endl;
-                    logger.Log(argus::LogLevel::Info, "Extension scan: 0 findings across " + std::to_string(total_profiles) + " profiles");
-                } else {
-                    std::cout << "Detected " << findings.size() << " risky extension(s)" << std::endl;
+                auto findings = extension_scanner.GetFindings();
+                
+                if (!findings.empty()) {
+                    std::cout << "\nRisky Extensions: " << findings.size() << " found" << std::endl;
                     for (const auto& f : findings) {
-                        std::cout << "  - " << f.extension_name << " (" << f.extension_id << ")" << std::endl;
+                        std::cout << "  - " << f.extension_name << ": " << f.pattern_matched << std::endl;
                     }
                     risk_engine.AnalyzeExtensionFindings(findings);
                     logger.Log(argus::LogLevel::Info, 
-                              "Extension scan: " + std::to_string(findings.size()) + " findings");
+                              "Extension scan: " + std::to_string(findings.size()) + " risky extensions");
                 }
+                
+                std::cout << "\n=== Credential Protection Active ===" << std::endl;
+                std::cout << "Watching for unauthorized access to browser credentials..." << std::endl;
+                
+                credential_monitor.StartDirectoryWatchers();
                 
                 if (localappdata) free(localappdata);
                 if (appdata) free(appdata);
@@ -229,7 +272,6 @@ std::cout.flush();
             }
             
             last_extension_scan = now;
-            std::cout << "Next scan in " << extension_scan_interval_seconds << " seconds\n" << std::endl;
         }
         
         auto assessments = risk_engine.GetAssessments();

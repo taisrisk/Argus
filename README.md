@@ -30,10 +30,10 @@ Argus is a local, read-only browser security sensor for Windows. It observes bro
 
 Argus is a sensor with smart response capabilities. It exists to give users visibility into their browser's behavior and protect their credentials from theft, without taking control away from them. It respects privacy, requires consent, leaves no trace (except legitimate threat detections), and trusts users to make informed decisions with clear information.
 
-**Phase 2.5**: Now includes real-time credential theft detection using behavioral correlation and file access monitoring—all without kernel drivers.
+**Phase 2.6**: Real-time credential theft detection with automatic threat termination. Argus now actively protects your credentials by killing malicious processes before data can be exfiltrated.
 
 ---
 
 **Build**: Open `Argus.sln` in Visual Studio, build for x64  
-**Run**: `x64\Debug\Argus.exe` or use `run_argus.bat`  
-**Phase**: 2.5 - Multi-browser monitoring + credential protection
+**Run**: `x64\Debug\Argus.exe` or use `run_argus.bat` (run as Administrator for process termination)  
+**Phase**: 2.6 - Active defense + automatic threat response

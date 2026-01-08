@@ -33,6 +33,7 @@ public:
     
     void Update();
     std::vector<ProcessEvent> GetRecentEvents(int max_count = 100);
+    std::vector<uint32_t> GetBrowserPids() const { return tracked_pids_; }
     
     bool IsBrowserActive() const { return is_browser_active_; }
     

@@ -3,6 +3,7 @@
 #include <fstream>
 #include <sstream>
 #include <iostream>
+#include <algorithm>
 
 namespace argus {
 
@@ -43,32 +44,23 @@ void ExtensionScanner::ScanExtensions(const std::string& browser_profile_path) {
     
     std::string extensions_path = browser_profile_path + "\\Extensions";
     
-    std::cout << "  Looking for extensions in: " << extensions_path << std::endl;
-    
     WIN32_FIND_DATAA find_data;
     HANDLE hFind = FindFirstFileA((extensions_path + "\\*").c_str(), &find_data);
     
     if (hFind == INVALID_HANDLE_VALUE) {
-        DWORD err = GetLastError();
-        std::cout << "  Extensions folder not found or inaccessible (error " << err << ")" << std::endl;
         return;
     }
     
-    int ext_count = 0;
     do {
         if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             std::string dir_name = find_data.cFileName;
             if (dir_name != "." && dir_name != ".." && dir_name != "Temp") {
-                ext_count++;
-                std::cout << "  Found extension: " << dir_name << std::endl;
                 ScanExtensionDirectory(extensions_path + "\\" + dir_name);
             }
         }
     } while (FindNextFileA(hFind, &find_data));
     
     FindClose(hFind);
-    
-    std::cout << "  Total extensions found: " << ext_count << std::endl;
 }
 
 std::vector<ExtensionFinding> ExtensionScanner::GetFindings() {
@@ -133,43 +125,78 @@ void ExtensionScanner::AnalyzeManifest(const std::string& manifest_path, const s
         size_t start = content.find(":", name_pos) + 1;
         size_t quote1 = content.find("\"", start);
         size_t quote2 = content.find("\"", quote1 + 1);
-        finding.extension_name = content.substr(quote1 + 1, quote2 - quote1 - 1);
+        if (quote1 != std::string::npos && quote2 != std::string::npos) {
+            finding.extension_name = content.substr(quote1 + 1, quote2 - quote1 - 1);
+        }
+    }
+    
+    if (finding.extension_name.empty() || finding.extension_name.find("__MSG_") == 0) {
+        return;
+    }
+    
+    std::string lower_name = finding.extension_name;
+    std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
+    
+    if (lower_name.find("proton vpn") != std::string::npos ||
+        lower_name.find("protonvpn") != std::string::npos ||
+        lower_name.find("nordvpn") != std::string::npos ||
+        lower_name.find("expressvpn") != std::string::npos ||
+        lower_name.find("surfshark") != std::string::npos ||
+        lower_name.find("mullvad") != std::string::npos ||
+        lower_name.find("windscribe") != std::string::npos ||
+        lower_name.find("cyberghost") != std::string::npos ||
+        lower_name.find("tunnelbear") != std::string::npos ||
+        lower_name.find("private internet access") != std::string::npos ||
+        lower_name.find("vyprvpn") != std::string::npos) {
+        return;
+    }
+    
+    if (lower_name.find("comet") != std::string::npos ||
+        lower_name.find("perplexity") != std::string::npos) {
+        return;
     }
     
     std::vector<std::string> high_risk_perms = {
-        "webRequest", "webRequestBlocking", "proxy", 
-        "<all_urls>", "debugger", "cookies"
+        "webRequestBlocking", "debugger", "proxy"
     };
     
-    std::vector<std::string> found_perms;
+    std::vector<std::string> medium_risk_perms = {
+        "<all_urls>", "webRequest"
+    };
+    
+    std::vector<std::string> found_high;
+    std::vector<std::string> found_medium;
+    
     for (const auto& perm : high_risk_perms) {
         if (content.find(perm) != std::string::npos) {
-            found_perms.push_back(perm);
+            found_high.push_back(perm);
         }
     }
     
-    if (!found_perms.empty()) {
-        finding.risk_level = AssessPermissions(found_perms);
+    for (const auto& perm : medium_risk_perms) {
+        if (content.find(perm) != std::string::npos) {
+            found_medium.push_back(perm);
+        }
+    }
+    
+    if (!found_high.empty()) {
+        finding.risk_level = RiskLevel::High;
         finding.pattern_matched = "High-risk permissions: ";
-        for (size_t i = 0; i < found_perms.size(); ++i) {
-            finding.pattern_matched += found_perms[i];
-            if (i < found_perms.size() - 1) {
-                finding.pattern_matched += ", ";
-            }
+        for (size_t i = 0; i < found_high.size(); ++i) {
+            finding.pattern_matched += found_high[i];
+            if (i < found_high.size() - 1) finding.pattern_matched += ", ";
         }
-        finding.explanation = "Extension has permissions that allow broad access to browsing data";
+        finding.explanation = "Extension can intercept/modify all web traffic";
         findings_.push_back(finding);
-    }
-    
-    if (content.find("background") != std::string::npos) {
-        if (content.find("service_worker") != std::string::npos || 
-            content.find("persistent") != std::string::npos) {
-            ExtensionFinding bg_finding = finding;
-            bg_finding.risk_level = RiskLevel::Low;
-            bg_finding.pattern_matched = "Background execution detected";
-            bg_finding.explanation = "Extension runs code in the background";
-            findings_.push_back(bg_finding);
+    } else if (found_medium.size() >= 2) {
+        finding.risk_level = RiskLevel::Medium;
+        finding.pattern_matched = "Broad permissions: ";
+        for (size_t i = 0; i < found_medium.size(); ++i) {
+            finding.pattern_matched += found_medium[i];
+            if (i < found_medium.size() - 1) finding.pattern_matched += ", ";
         }
+        finding.explanation = "Extension has broad access to browsing data";
+        findings_.push_back(finding);
     }
 }
 

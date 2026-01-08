@@ -6,6 +6,12 @@
 #include <map>
 #include <set>
 #include <cstdint>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <windows.h>
+#include <evntrace.h>
+#include <evntcons.h>
 
 namespace argus {
 
@@ -14,7 +20,8 @@ enum class AssetType {
     LoginData,
     LocalState,
     WebData,
-    ExtensionScript
+    ExtensionScript,
+    Unknown
 };
 
 struct SensitiveAsset {
@@ -43,6 +50,23 @@ struct ThreatChain {
     int risk_score;
     std::chrono::system_clock::time_point first_event;
     std::chrono::system_clock::time_point last_event;
+    bool reported;
+};
+
+struct FileSnapshot {
+    std::string path;
+    time_t last_access;
+    time_t last_modify;
+    int64_t size;
+};
+
+struct MonitoringStatus {
+    std::string browser;
+    std::string profile;
+    int files_found;
+    int files_monitored;
+    std::vector<std::string> monitored_files;
+    std::vector<std::string> missing_files;
 };
 
 class CredentialMonitor {
@@ -54,24 +78,58 @@ public:
     void Shutdown();
     
     void RegisterBrowserProfile(const std::string& browser, const std::string& profile_path);
+    MonitoringStatus RegisterBrowserProfileWithStatus(const std::string& browser, const std::string& profile_path);
     void SetBrowserProcessIds(const std::vector<uint32_t>& pids);
     
     void Update();
     std::vector<ThreatChain> GetActiveThreats();
     
+    void TerminateThread(uint32_t pid);
+    bool KillProcess(uint32_t pid);
+    
+    void OnFileAccess(uint32_t pid, const std::wstring& filepath);
+    
+    void StartDirectoryWatchers();
+    void StopDirectoryWatchers();
+    static DWORD WINAPI WatcherThread(LPVOID param);
+    
 private:
-    void BuildAssetRegistry();
-    void CreateDecoyProfile(const std::string& browser, const std::string& base_path);
-    void MonitorFileAccess();
+    void StartETWSession();
+    void StopETWSession();
+    static void WINAPI ETWCallback(PEVENT_RECORD eventRecord);
+    
+    void CheckFileChanges();
+    std::vector<uint32_t> FindProcessesWithFileOpen(const std::string& filepath);
+    std::vector<uint32_t> GetRecentProcesses();
+    
+    bool IsSensitiveFile(const std::wstring& filepath);
+    AssetType GetAssetType(const std::wstring& filepath);
+    void RecordAccess(uint32_t pid, const std::wstring& filepath);
+    std::string GetProcessPath(uint32_t pid);
+    bool IsProcessSuspicious(uint32_t pid);
     void AnalyzeAccessPatterns();
     int CalculateRiskScore(const ThreatChain& chain);
-    bool IsProcessSuspicious(uint32_t pid);
     
     bool is_active_;
     std::vector<SensitiveAsset> asset_registry_;
     std::vector<uint32_t> browser_pids_;
     std::map<uint32_t, ThreatChain> active_chains_;
     std::chrono::system_clock::time_point last_check_;
+    std::map<std::string, std::string> profile_paths_;
+    std::map<std::string, FileSnapshot> file_snapshots_;
+    std::vector<std::string> watched_directories_;
+    std::vector<HANDLE> watcher_threads_;
+    
+    TRACEHANDLE session_handle_;
+    TRACEHANDLE trace_handle_;
+    std::thread etw_thread_;
+    std::atomic<bool> etw_running_;
+    std::mutex chains_mutex_;
+    
+    static CredentialMonitor* s_instance;
 };
 
 }
+
+
+

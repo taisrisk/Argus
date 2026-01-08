@@ -59,13 +59,25 @@ Argus is an active defense system that protects browser credentials without taki
 - Low-risk or whitelisted activity
 - No alert generated
 
-**Phase 2.6**: Real-time credential theft detection with automatic threat termination. Argus now actively protects your credentials by killing malicious processes before data can be exfiltrated.
+**Phase 2.7.1**: Identity-based tracking + anti-staging detection. Argus now detects credential theft by file identity (not path), catches symlink evasion, and terminates processes attempting to stage stolen data in temp files.
 
 ---
 
-**Build**: Open `Argus.sln` in Visual Studio, build for x64  
+**Core Detection Layers:**
+1. **File Identity Tracking** - Files tracked by (file_id, volume_serial), not path
+2. **10ms Polling** - File stat changes detected every 10 milliseconds
+3. **I/O Completion Ports** - Kernel notifications for directory changes
+4. **Temp File Watcher** - Real-time monitoring of %TEMP% for staging behavior
+5. **Behavioral Scoring** - 0-200+ point scale based on intent signals
+
+**Detection Window: <100ms end-to-end**
+
+**Build**: Open `Argus.sln` in Visual Studio
+1. Ensure `core/file_identity.cpp` is in the project
+2. Build for x64 Debug/Release
+
 **Run**: `x64\Debug\Argus.exe` or use `run_argus.bat` (run as Administrator for process termination)  
-**Phase**: 2.6 - Active defense + automatic threat response
+**Phase**: 2.7.1 - Identity tracking + anti-staging + behavioral analysis
 
 ### Whitelisted Applications (100+)
 

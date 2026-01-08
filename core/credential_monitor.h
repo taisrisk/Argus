@@ -1,5 +1,6 @@
 #pragma once
 
+#include "file_identity.h"
 #include <string>
 #include <vector>
 #include <chrono>
@@ -92,6 +93,8 @@ public:
     void StartDirectoryWatchers();
     void StopDirectoryWatchers();
     static DWORD WINAPI WatcherThread(LPVOID param);
+    static DWORD WINAPI PollingThread(LPVOID param);
+    static DWORD WINAPI TempFileWatcherThread(LPVOID param);
     
 private:
     void StartETWSession();
@@ -119,6 +122,10 @@ private:
     std::map<std::string, FileSnapshot> file_snapshots_;
     std::vector<std::string> watched_directories_;
     std::vector<HANDLE> watcher_threads_;
+    HANDLE polling_thread_;
+    HANDLE temp_watcher_thread_;
+    
+    FileIdentityTracker file_identity_tracker_;
     
     TRACEHANDLE session_handle_;
     TRACEHANDLE trace_handle_;

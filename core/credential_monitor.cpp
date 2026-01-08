@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <psapi.h>
 #include <tlhelp32.h>
+#include <winternl.h>
 #include <algorithm>
 #include <iostream>
 #include <sstream>
@@ -10,6 +11,25 @@
 #include <set>
 
 #pragma comment(lib, "psapi.lib")
+#pragma comment(lib, "ntdll.lib")
+
+typedef VOID (NTAPI *PIO_APC_ROUTINE_CUSTOM)(
+    PVOID ApcContext,
+    PIO_STATUS_BLOCK IoStatusBlock,
+    ULONG Reserved
+);
+
+extern "C" NTSTATUS NTAPI NtNotifyChangeDirectoryFile(
+    HANDLE FileHandle,
+    HANDLE Event,
+    PIO_APC_ROUTINE_CUSTOM ApcRoutine,
+    PVOID ApcContext,
+    PIO_STATUS_BLOCK IoStatusBlock,
+    PVOID Buffer,
+    ULONG Length,
+    ULONG CompletionFilter,
+    BOOLEAN WatchTree
+);
 
 namespace argus {
 
@@ -24,7 +44,8 @@ public:
 CredentialMonitor* CredentialMonitor::s_instance = nullptr;
 
 CredentialMonitor::CredentialMonitor() 
-    : is_active_(false), session_handle_(0), trace_handle_(0), etw_running_(false) {
+    : is_active_(false), session_handle_(0), trace_handle_(0), etw_running_(false), 
+      polling_thread_(NULL), temp_watcher_thread_(NULL) {
     s_instance = this;
 }
 
@@ -44,7 +65,12 @@ bool CredentialMonitor::Initialize() {
     etw_running_ = true;
     last_check_ = std::chrono::system_clock::now();
     
-    std::cout << "[CredentialMonitor] Real-time file monitoring active" << std::endl;
+    file_identity_tracker_.Initialize();
+    
+    polling_thread_ = CreateThread(NULL, 0, PollingThread, this, 0, NULL);
+    temp_watcher_thread_ = CreateThread(NULL, 0, TempFileWatcherThread, this, 0, NULL);
+    
+    std::cout << "[CredentialMonitor] Real-time monitoring + identity tracking + temp file detection active" << std::endl;
     
     return true;
 }
@@ -57,6 +83,20 @@ void CredentialMonitor::Shutdown() {
     etw_running_ = false;
     StopDirectoryWatchers();
     StopETWSession();
+    
+    if (polling_thread_) {
+        WaitForSingleObject(polling_thread_, 2000);
+        CloseHandle(polling_thread_);
+        polling_thread_ = NULL;
+    }
+    
+    if (temp_watcher_thread_) {
+        WaitForSingleObject(temp_watcher_thread_, 2000);
+        CloseHandle(temp_watcher_thread_);
+        temp_watcher_thread_ = NULL;
+    }
+    
+    file_identity_tracker_.Shutdown();
     
     is_active_ = false;
     asset_registry_.clear();
@@ -98,112 +138,145 @@ DWORD WINAPI CredentialMonitor::WatcherThread(LPVOID param) {
         return 1;
     }
     
-    char buffer[4096];
-    OVERLAPPED overlapped = {0};
-    overlapped.hEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
-    
     if (!s_instance) {
         CloseHandle(hDir);
-        CloseHandle(overlapped.hEvent);
         delete directory;
         return 1;
     }
     
+    HANDLE hCompletion = CreateIoCompletionPort(hDir, NULL, (ULONG_PTR)hDir, 1);
+    if (!hCompletion) {
+        CloseHandle(hDir);
+        delete directory;
+        return 1;
+    }
+    
+    char buffer[65536];
+    IO_STATUS_BLOCK iosb;
+    
     while (s_instance->etw_running_) {
-        ResetEvent(overlapped.hEvent);
-        DWORD bytesReturned = 0;
+        ZeroMemory(&iosb, sizeof(iosb));
+        ZeroMemory(buffer, sizeof(buffer));
         
-        BOOL result = ReadDirectoryChangesW(
+        NTSTATUS status = NtNotifyChangeDirectoryFile(
             hDir,
+            hCompletion,
+            NULL,
+            NULL,
+            &iosb,
             buffer,
             sizeof(buffer),
-            TRUE,
-            FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE,
-            &bytesReturned,
-            &overlapped,
-            NULL
+            FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_ACCESS | 
+            FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE | 
+            FILE_NOTIFY_CHANGE_CREATION,
+            TRUE
         );
         
-        if (!result && GetLastError() != ERROR_IO_PENDING) {
+        if (status != 0 && status != 0x103) {
             break;
         }
         
-        DWORD waitResult = WaitForSingleObject(overlapped.hEvent, 100);
+        DWORD bytesTransferred = 0;
+        ULONG_PTR completionKey = 0;
+        LPOVERLAPPED pOverlapped = NULL;
         
-        if (waitResult == WAIT_OBJECT_0) {
-            if (GetOverlappedResult(hDir, &overlapped, &bytesReturned, FALSE)) {
-                if (bytesReturned > 0) {
-                    FILE_NOTIFY_INFORMATION* info = (FILE_NOTIFY_INFORMATION*)buffer;
+        if (GetQueuedCompletionStatus(hCompletion, &bytesTransferred, &completionKey, &pOverlapped, 50)) {
+            if (bytesTransferred > 0) {
+                FILE_NOTIFY_INFORMATION* info = (FILE_NOTIFY_INFORMATION*)buffer;
+                
+                std::vector<std::wstring> critical_files;
+                
+                do {
+                    std::wstring filename(info->FileName, info->FileNameLength / sizeof(WCHAR));
+                    std::wstring fullPath = wDirectory + L"\\" + filename;
                     
-                    do {
-                        std::wstring filename(info->FileName, info->FileNameLength / sizeof(WCHAR));
-                        std::wstring fullPath = wDirectory + L"\\" + filename;
+                    std::wstring lower = fullPath;
+                    std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
+                    
+                    if (lower.find(L"login data") != std::wstring::npos ||
+                        lower.find(L"local state") != std::wstring::npos ||
+                        lower.find(L"cookies") != std::wstring::npos ||
+                        lower.find(L"web data") != std::wstring::npos) {
+                        critical_files.push_back(fullPath);
+                    }
+                    
+                    if (info->NextEntryOffset == 0) break;
+                    info = (FILE_NOTIFY_INFORMATION*)((BYTE*)info + info->NextEntryOffset);
+                } while (true);
+                
+                if (!critical_files.empty()) {
+                    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+                    if (snapshot != INVALID_HANDLE_VALUE) {
+                        PROCESSENTRY32W pe32;
+                        pe32.dwSize = sizeof(PROCESSENTRY32W);
                         
-                        std::wstring lower = fullPath;
-                        std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
+                        std::vector<uint32_t> all_suspicious;
                         
-                        if (lower.find(L"login data") != std::wstring::npos ||
-                            lower.find(L"cookies") != std::wstring::npos ||
-                            lower.find(L"local state") != std::wstring::npos ||
-                            lower.find(L"web data") != std::wstring::npos) {
-                            
-                            std::vector<uint32_t> recent_pids;
-                            HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-                            if (snapshot != INVALID_HANDLE_VALUE) {
-                                PROCESSENTRY32W pe32;
-                                pe32.dwSize = sizeof(PROCESSENTRY32W);
-                                
-                                if (Process32FirstW(snapshot, &pe32)) {
-                                    do {
-                                        if (s_instance->IsProcessSuspicious(pe32.th32ProcessID)) {
-                                            HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe32.th32ProcessID);
-                                            if (hProcess) {
-                                                FILETIME createTime, exitTime, kernelTime, userTime;
-                                                if (GetProcessTimes(hProcess, &createTime, &exitTime, &kernelTime, &userTime)) {
-                                                    ULARGE_INTEGER create;
-                                                    create.LowPart = createTime.dwLowDateTime;
-                                                    create.HighPart = createTime.dwHighDateTime;
-                                                    
-                                                    FILETIME nowFT;
-                                                    GetSystemTimeAsFileTime(&nowFT);
-                                                    ULARGE_INTEGER now;
-                                                    now.LowPart = nowFT.dwLowDateTime;
-                                                    now.HighPart = nowFT.dwHighDateTime;
-                                                    
-                                                    uint64_t age_seconds = (now.QuadPart - create.QuadPart) / 10000000ULL;
-                                                    if (age_seconds < 5) {
-                                                        recent_pids.push_back(pe32.th32ProcessID);
-                                                    }
-                                                }
-                                                CloseHandle(hProcess);
-                                            }
-                                        }
-                                    } while (Process32NextW(snapshot, &pe32) && recent_pids.size() < 3);
+                        if (Process32FirstW(snapshot, &pe32)) {
+                            do {
+                                if (s_instance->IsProcessSuspicious(pe32.th32ProcessID)) {
+                                    all_suspicious.push_back(pe32.th32ProcessID);
                                 }
-                                CloseHandle(snapshot);
+                            } while (Process32NextW(snapshot, &pe32));
+                        }
+                        CloseHandle(snapshot);
+                        
+                        for (const auto& filepath : critical_files) {
+                            HANDLE hFile = CreateFileW(
+                                filepath.c_str(),
+                                GENERIC_READ,
+                                0,
+                                NULL,
+                                OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL,
+                                NULL
+                            );
+                            
+                            if (hFile == INVALID_HANDLE_VALUE && GetLastError() == ERROR_SHARING_VIOLATION) {
+                                for (uint32_t pid : all_suspicious) {
+                                    std::lock_guard<std::mutex> lock(s_instance->chains_mutex_);
+                                    s_instance->RecordAccess(pid, filepath);
+                                }
+                                break;
                             }
                             
-                            if (!recent_pids.empty()) {
-                                for (uint32_t pid : recent_pids) {
-                                    std::lock_guard<std::mutex> lock(s_instance->chains_mutex_);
-                                    s_instance->RecordAccess(pid, fullPath);
+                            if (hFile != INVALID_HANDLE_VALUE) {
+                                CloseHandle(hFile);
+                            }
+                            
+                            for (uint32_t pid : all_suspicious) {
+                                HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+                                if (hProcess) {
+                                    FILETIME createTime, exitTime, kernelTime, userTime;
+                                    if (GetProcessTimes(hProcess, &createTime, &exitTime, &kernelTime, &userTime)) {
+                                        ULARGE_INTEGER create;
+                                        create.LowPart = createTime.dwLowDateTime;
+                                        create.HighPart = createTime.dwHighDateTime;
+                                        
+                                        FILETIME nowFT;
+                                        GetSystemTimeAsFileTime(&nowFT);
+                                        ULARGE_INTEGER now;
+                                        now.LowPart = nowFT.dwLowDateTime;
+                                        now.HighPart = nowFT.dwHighDateTime;
+                                        
+                                        uint64_t age_seconds = (now.QuadPart - create.QuadPart) / 10000000ULL;
+                                        if (age_seconds < 120) {
+                                            std::lock_guard<std::mutex> lock(s_instance->chains_mutex_);
+                                            s_instance->RecordAccess(pid, filepath);
+                                            break;
+                                        }
+                                    }
+                                    CloseHandle(hProcess);
                                 }
                             }
                         }
-                        
-                        if (info->NextEntryOffset == 0) break;
-                        info = (FILE_NOTIFY_INFORMATION*)((BYTE*)info + info->NextEntryOffset);
-                    } while (true);
+                    }
                 }
             }
-        } else if (waitResult == WAIT_TIMEOUT) {
-            continue;
-        } else {
-            break;
         }
     }
     
-    CloseHandle(overlapped.hEvent);
+    CloseHandle(hCompletion);
     CloseHandle(hDir);
     delete directory;
     return 0;
@@ -243,6 +316,178 @@ void CredentialMonitor::StopDirectoryWatchers() {
     }
     watcher_threads_.clear();
     watched_directories_.clear();
+}
+
+DWORD WINAPI CredentialMonitor::PollingThread(LPVOID param) {
+    CredentialMonitor* monitor = (CredentialMonitor*)param;
+    
+    while (monitor->etw_running_) {
+        monitor->CheckFileChanges();
+        Sleep(10);
+    }
+    
+    return 0;
+}
+
+DWORD WINAPI CredentialMonitor::TempFileWatcherThread(LPVOID param) {
+    CredentialMonitor* monitor = (CredentialMonitor*)param;
+    
+    char tempPath[MAX_PATH];
+    DWORD tempPathLen = GetTempPathA(MAX_PATH, tempPath);
+    if (tempPathLen == 0) {
+        return 1;
+    }
+    
+    std::wstring wTempPath(tempPath, tempPath + tempPathLen);
+    
+    HANDLE hDir = CreateFileW(
+        wTempPath.c_str(),
+        FILE_LIST_DIRECTORY,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+        NULL
+    );
+    
+    if (hDir == INVALID_HANDLE_VALUE) {
+        return 1;
+    }
+    
+    HANDLE hCompletion = CreateIoCompletionPort(hDir, NULL, (ULONG_PTR)hDir, 1);
+    if (!hCompletion) {
+        CloseHandle(hDir);
+        return 1;
+    }
+    
+    char buffer[65536];
+    IO_STATUS_BLOCK iosb;
+    
+    while (monitor->etw_running_) {
+        ZeroMemory(&iosb, sizeof(iosb));
+        ZeroMemory(buffer, sizeof(buffer));
+        
+        NTSTATUS status = NtNotifyChangeDirectoryFile(
+            hDir,
+            hCompletion,
+            NULL,
+            NULL,
+            &iosb,
+            buffer,
+            sizeof(buffer),
+            FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_CREATION,
+            TRUE
+        );
+        
+        if (status != 0 && status != 0x103) {
+            break;
+        }
+        
+        DWORD bytesTransferred = 0;
+        ULONG_PTR completionKey = 0;
+        LPOVERLAPPED pOverlapped = NULL;
+        
+        if (GetQueuedCompletionStatus(hCompletion, &bytesTransferred, &completionKey, &pOverlapped, 50)) {
+            if (bytesTransferred > 0) {
+                FILE_NOTIFY_INFORMATION* info = (FILE_NOTIFY_INFORMATION*)buffer;
+                
+                do {
+                    std::wstring filename(info->FileName, info->FileNameLength / sizeof(WCHAR));
+                    std::wstring fullPath = wTempPath + filename;
+                    
+                    std::wstring lower = fullPath;
+                    std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
+                    
+                    bool is_suspicious = (lower.find(L"temp.db") != std::wstring::npos ||
+                                         lower.find(L"tempcookies") != std::wstring::npos ||
+                                         lower.find(L"temp_cookies") != std::wstring::npos ||
+                                         lower.find(L"temp_login") != std::wstring::npos ||
+                                         lower.find(L"temp_pass") != std::wstring::npos ||
+                                         lower.find(L"staging") != std::wstring::npos ||
+                                         lower.find(L"dump") != std::wstring::npos ||
+                                         (lower.find(L".db") != std::wstring::npos) ||
+                                         (lower.find(L".sqlite") != std::wstring::npos) ||
+                                         (lower.find(L"cookie") != std::wstring::npos) ||
+                                         (lower.find(L"login") != std::wstring::npos) ||
+                                         (lower.find(L"password") != std::wstring::npos));
+                    
+                    if (is_suspicious) {
+                        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+                        if (snapshot != INVALID_HANDLE_VALUE) {
+                            PROCESSENTRY32W pe32;
+                            pe32.dwSize = sizeof(PROCESSENTRY32W);
+                            
+                            if (Process32FirstW(snapshot, &pe32)) {
+                                do {
+                                    if (monitor->IsProcessSuspicious(pe32.th32ProcessID)) {
+                                        HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe32.th32ProcessID);
+                                        if (hProcess) {
+                                            FILETIME createTime, exitTime, kernelTime, userTime;
+                                            if (GetProcessTimes(hProcess, &createTime, &exitTime, &kernelTime, &userTime)) {
+                                                ULARGE_INTEGER create;
+                                                create.LowPart = createTime.dwLowDateTime;
+                                                create.HighPart = createTime.dwHighDateTime;
+                                                
+                                                FILETIME nowFT;
+                                                GetSystemTimeAsFileTime(&nowFT);
+                                                ULARGE_INTEGER now;
+                                                now.LowPart = nowFT.dwLowDateTime;
+                                                now.HighPart = nowFT.dwHighDateTime;
+                                                
+                                                uint64_t age_seconds = (now.QuadPart - create.QuadPart) / 10000000ULL;
+                                                if (age_seconds < 30) {
+                                                    std::string fullPath_narrow(fullPath.begin(), fullPath.end());
+                                                    monitor->file_identity_tracker_.RecordFileWrite(pe32.th32ProcessID, fullPath_narrow);
+                                                    
+                                                    ProcessActivity* activity = monitor->file_identity_tracker_.GetProcessActivity(pe32.th32ProcessID);
+                                                    if (activity) {
+                                                        std::cout << "\n!!! STAGING BEHAVIOR DETECTED !!!" << std::endl;
+                                                        std::cout << "========================================" << std::endl;
+                                                        std::cout << "  PID: " << pe32.th32ProcessID << std::endl;
+                                                        std::cout << "  Process: " << activity->process_path << std::endl;
+                                                        std::cout << "  Temp File: " << fullPath_narrow << std::endl;
+                                                        std::cout << "  Behavior Score: " << activity->behavior_score << std::endl;
+                                                        std::cout << "  Classification: ";
+                                                        
+                                                        if (activity->behavior_score >= 120) {
+                                                            std::cout << "CONFIRMED THEFT + STAGING" << std::endl;
+                                                            std::cout << ">>> TERMINATING IMMEDIATELY" << std::endl;
+                                                            if (monitor->KillProcess(pe32.th32ProcessID)) {
+                                                                std::cout << ">>> SUCCESS: Process terminated" << std::endl;
+                                                            }
+                                                        } else if (activity->behavior_score >= 90) {
+                                                            std::cout << "HIGH RISK STAGING" << std::endl;
+                                                            std::cout << ">>> TERMINATING" << std::endl;
+                                                            if (monitor->KillProcess(pe32.th32ProcessID)) {
+                                                                std::cout << ">>> SUCCESS: Process terminated" << std::endl;
+                                                            }
+                                                        } else {
+                                                            std::cout << "SUSPICIOUS ACTIVITY" << std::endl;
+                                                        }
+                                                        std::cout << "========================================\n" << std::endl;
+                                                    }
+                                                    break;
+                                                }
+                                            }
+                                            CloseHandle(hProcess);
+                                        }
+                                    }
+                                } while (Process32NextW(snapshot, &pe32));
+                            }
+                            CloseHandle(snapshot);
+                        }
+                    }
+                    
+                    if (info->NextEntryOffset == 0) break;
+                    info = (FILE_NOTIFY_INFORMATION*)((BYTE*)info + info->NextEntryOffset);
+                } while (true);
+            }
+        }
+    }
+    
+    CloseHandle(hCompletion);
+    CloseHandle(hDir);
+    return 0;
 }
 
 void WINAPI CredentialMonitor::ETWCallback(PEVENT_RECORD eventRecord) {
@@ -305,8 +550,19 @@ MonitoringStatus CredentialMonitor::RegisterBrowserProfileWithStatus(const std::
             snapshot.size = statbuf.st_size;
             file_snapshots_[full_path] = snapshot;
             
+            std::string logical_type;
+            switch (type) {
+                case AssetType::Cookies: logical_type = "cookies"; break;
+                case AssetType::LoginData: logical_type = "passwords"; break;
+                case AssetType::LocalState: logical_type = "masterkey"; break;
+                case AssetType::WebData: logical_type = "autofill"; break;
+                default: logical_type = "unknown"; break;
+            }
+            
+            if (file_identity_tracker_.RegisterFile(full_path, browser, profile_path, logical_type)) {
+                status.files_monitored++;
+            }
             status.files_found++;
-            status.files_monitored++;
             
             size_t ls = full_path.find_last_of("\\");
             std::string filename = (ls != std::string::npos) ? full_path.substr(ls + 1) : full_path;
@@ -330,15 +586,8 @@ void CredentialMonitor::Update() {
         return;
     }
     
-    auto now = std::chrono::system_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_check_).count();
-    
-    if (elapsed >= 500) {
-        CheckFileChanges();
-        std::lock_guard<std::mutex> lock(chains_mutex_);
-        AnalyzeAccessPatterns();
-        last_check_ = now;
-    }
+    std::lock_guard<std::mutex> lock(chains_mutex_);
+    AnalyzeAccessPatterns();
 }
 
 void CredentialMonitor::CheckFileChanges() {
@@ -350,20 +599,63 @@ void CredentialMonitor::CheckFileChanges() {
         if (_stat64(path.c_str(), &statbuf) == 0) {
             bool accessed = (statbuf.st_atime != old_snap.last_access);
             bool modified = (statbuf.st_mtime != old_snap.last_modify);
-            bool copied = (statbuf.st_size != old_snap.size);
+            bool size_changed = (statbuf.st_size != old_snap.size);
             
-            if (accessed || modified) {
-                std::vector<uint32_t> suspicious_pids = FindProcessesWithFileOpen(path);
+            if (accessed || modified || size_changed) {
+                std::wstring wpath(path.begin(), path.end());
                 
-                if (suspicious_pids.empty()) {
-                    suspicious_pids = GetRecentProcesses();
+                std::string lower_path = path;
+                std::transform(lower_path.begin(), lower_path.end(), lower_path.begin(), ::tolower);
+                
+                bool is_critical = (lower_path.find("login data") != std::string::npos ||
+                                   lower_path.find("local state") != std::string::npos ||
+                                   lower_path.find("cookies") != std::string::npos);
+                
+                std::vector<uint32_t> suspicious_pids;
+                
+                HANDLE hFile = CreateFileA(
+                    path.c_str(),
+                    GENERIC_READ,
+                    0,
+                    NULL,
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL,
+                    NULL
+                );
+                
+                if (hFile == INVALID_HANDLE_VALUE && GetLastError() == ERROR_SHARING_VIOLATION) {
+                    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+                    if (snapshot != INVALID_HANDLE_VALUE) {
+                        PROCESSENTRY32W pe32;
+                        pe32.dwSize = sizeof(PROCESSENTRY32W);
+                        
+                        if (Process32FirstW(snapshot, &pe32)) {
+                            do {
+                                if (IsProcessSuspicious(pe32.th32ProcessID)) {
+                                    suspicious_pids.push_back(pe32.th32ProcessID);
+                                }
+                            } while (Process32NextW(snapshot, &pe32));
+                        }
+                        CloseHandle(snapshot);
+                    }
+                } else {
+                    if (hFile != INVALID_HANDLE_VALUE) {
+                        CloseHandle(hFile);
+                    }
+                    
+                    if (is_critical) {
+                        suspicious_pids = GetRecentProcesses();
+                    }
                 }
                 
-                for (uint32_t pid : suspicious_pids) {
-                    if (IsProcessSuspicious(pid)) {
-                        std::wstring wpath(path.begin(), path.end());
+                if (!suspicious_pids.empty()) {
+                    for (uint32_t pid : suspicious_pids) {
                         std::lock_guard<std::mutex> lock(chains_mutex_);
                         RecordAccess(pid, wpath);
+                        
+                        if (is_critical) {
+                            break;
+                        }
                     }
                 }
             }
@@ -443,7 +735,7 @@ std::vector<uint32_t> CredentialMonitor::GetRecentProcesses() {
                         now.HighPart = nowFT.dwHighDateTime;
                         
                         uint64_t age_seconds = (now.QuadPart - create.QuadPart) / 10000000ULL;
-                        if (age_seconds < 60) {
+                        if (age_seconds < 120) {
                             pids.push_back(pid);
                         }
                     }
@@ -493,56 +785,126 @@ AssetType CredentialMonitor::GetAssetType(const std::wstring& filepath) {
     if (lower.find(L"login data") != std::wstring::npos || 
         lower.find(L"logins.json") != std::wstring::npos ||
         lower.find(L"key4.db") != std::wstring::npos) return AssetType::LoginData;
-    if (lower.find(L"cookies") != std::wstring::npos) return AssetType::Cookies;
     if (lower.find(L"local state") != std::wstring::npos) return AssetType::LocalState;
+    if (lower.find(L"cookies-journal") != std::wstring::npos) return AssetType::Cookies;
+    if (lower.find(L"cookies") != std::wstring::npos) return AssetType::Cookies;
     if (lower.find(L"web data") != std::wstring::npos) return AssetType::WebData;
     return AssetType::Unknown;
 }
 
 void CredentialMonitor::RecordAccess(uint32_t pid, const std::wstring& filepath) {
-    auto now = std::chrono::system_clock::now();
+auto now = std::chrono::system_clock::now();
     
-    std::string filepath_narrow(filepath.begin(), filepath.end());
+std::string filepath_narrow(filepath.begin(), filepath.end());
     
-    AccessEvent event;
-    event.timestamp = now;
-    event.pid = pid;
-    event.parent_pid = 0;
-    event.process_path = GetProcessPath(pid);
-    event.file_accessed = filepath_narrow;
-    event.asset_type = GetAssetType(filepath);
-    event.is_browser_process = false;
-    event.is_decoy_hit = false;
+std::string lower_narrow = filepath_narrow;
+std::transform(lower_narrow.begin(), lower_narrow.end(), lower_narrow.begin(), ::tolower);
     
-    bool is_new_threat = false;
-    if (active_chains_.find(pid) == active_chains_.end()) {
-        ThreatChain chain;
-        chain.pid = pid;
-        chain.process_path = event.process_path;
-        chain.first_event = now;
-        chain.last_event = now;
-        chain.risk_score = 0;
-        chain.reported = false;
-        active_chains_[pid] = chain;
-        is_new_threat = true;
+uint64_t file_id = 0;
+uint32_t volume_serial = 0;
+bool has_identity = file_identity_tracker_.GetFileIdentity(filepath_narrow, file_id, volume_serial);
+    
+bool is_indirect = has_identity && file_identity_tracker_.IsReparsePoint(filepath_narrow);
+    
+    if (has_identity) {
+        file_identity_tracker_.RecordFileAccess(pid, filepath_narrow, file_id, volume_serial, is_indirect);
         
-        std::cout << "\n!!! CREDENTIAL THEFT DETECTED !!!" << std::endl;
-        std::cout << "========================================" << std::endl;
-        std::cout << "  PID: " << pid << std::endl;
-        std::cout << "  Process: " << event.process_path << std::endl;
-        std::cout << "  Target: " << filepath_narrow << std::endl;
-        std::cout << "  Asset: ";
-        switch (event.asset_type) {
-            case AssetType::Cookies: std::cout << "COOKIES (session tokens)"; break;
-            case AssetType::LoginData: std::cout << "PASSWORDS"; break;
-            case AssetType::LocalState: std::cout << "ENCRYPTION KEY"; break;
-            case AssetType::WebData: std::cout << "AUTOFILL DATA"; break;
-            default: std::cout << "BROWSER DATA"; break;
+        ProcessActivity* activity = file_identity_tracker_.GetProcessActivity(pid);
+        if (activity) {
+            if (activity->has_temp_staging) {
+                std::cout << "\n!!! CRITICAL: STAGING + CREDENTIAL ACCESS !!!" << std::endl;
+                std::cout << "Behavior Score: " << activity->behavior_score << std::endl;
+                std::cout << "Temp DB Files: " << activity->temp_db_files.size() << std::endl;
+                for (const auto& temp_file : activity->temp_db_files) {
+                    std::cout << "  - " << temp_file << std::endl;
+                }
+                std::cout << ">>> TERMINATING IMMEDIATELY" << std::endl;
+                if (KillProcess(pid)) {
+                    std::cout << ">>> SUCCESS: Staging process terminated" << std::endl;
+                } else {
+                    std::cout << ">>> FAILURE: Could not terminate" << std::endl;
+                }
+                std::cout << std::endl;
+            } else if (activity->behavior_score >= 90) {
+                std::cout << "\n!!! HIGH RISK BEHAVIOR DETECTED !!!" << std::endl;
+                std::cout << "Behavior Score: " << activity->behavior_score << std::endl;
+                std::cout << "Classification: ";
+                if (activity->behavior_score >= 120) {
+                    std::cout << "CONFIRMED CREDENTIAL THEFT" << std::endl;
+                    std::cout << ">>> TERMINATING IMMEDIATELY" << std::endl;
+                    if (KillProcess(pid)) {
+                        std::cout << ">>> SUCCESS: Process terminated" << std::endl;
+                    }
+                } else {
+                    std::cout << "HIGH RISK ACTIVITY" << std::endl;
+                }
+                std::cout << std::endl;
+            }
         }
-        std::cout << std::endl;
-    } else {
-        std::cout << "\n[THREAT UPDATE] PID " << pid << " accessed: " << filepath_narrow << std::endl;
     }
+    
+AccessEvent event;
+event.timestamp = now;
+event.pid = pid;
+event.parent_pid = 0;
+event.process_path = GetProcessPath(pid);
+event.file_accessed = filepath_narrow;
+event.asset_type = GetAssetType(filepath);
+event.is_browser_process = false;
+event.is_decoy_hit = false;
+    
+bool is_new_threat = false;
+if (active_chains_.find(pid) == active_chains_.end()) {
+    ThreatChain chain;
+    chain.pid = pid;
+    chain.process_path = event.process_path;
+    chain.first_event = now;
+    chain.last_event = now;
+    chain.risk_score = 0;
+    chain.reported = false;
+    active_chains_[pid] = chain;
+    is_new_threat = true;
+        
+    std::cout << "\n!!! CREDENTIAL THEFT DETECTED !!!" << std::endl;
+    std::cout << "========================================" << std::endl;
+    std::cout << "  PID: " << pid << std::endl;
+    std::cout << "  Process: " << event.process_path << std::endl;
+    std::cout << "  Target: " << filepath_narrow << std::endl;
+        
+    if (is_indirect) {
+        std::cout << "  Access Type: INDIRECT (via reparse point)" << std::endl;
+        std::cout << "  Evasion Technique: Symlink/Junction/Hardlink" << std::endl;
+    }
+        
+    if (has_identity) {
+        FileIdentity* identity = file_identity_tracker_.GetFileIdentity(file_id, volume_serial);
+        if (identity) {
+            std::cout << "  Canonical Path: " << identity->canonical_path << std::endl;
+            std::cout << "  File Identity: " << identity->logical_type << std::endl;
+        }
+    }
+        
+    std::cout << "  Asset: ";
+    switch (event.asset_type) {
+        case AssetType::Cookies: 
+            if (lower_narrow.find("cookies-journal") != std::string::npos) {
+                std::cout << "COOKIES-JOURNAL (auth requests)";
+            } else {
+                std::cout << "COOKIES (session tokens)";
+            }
+            break;
+        case AssetType::LoginData: std::cout << "PASSWORDS"; break;
+        case AssetType::LocalState: std::cout << "ENCRYPTION KEY"; break;
+        case AssetType::WebData: std::cout << "AUTOFILL DATA"; break;
+        default: std::cout << "BROWSER DATA"; break;
+    }
+    std::cout << std::endl;
+} else {
+    std::cout << "\n[THREAT UPDATE] PID " << pid << " accessed: " << filepath_narrow << std::endl;
+    if (is_indirect) {
+        std::cout << "  [EVASION] Indirect access via reparse point" << std::endl;
+    }
+}
     
     active_chains_[pid].events.push_back(event);
     active_chains_[pid].last_event = now;
@@ -563,6 +925,17 @@ void CredentialMonitor::RecordAccess(uint32_t pid, const std::wstring& filepath)
     if (types.count(AssetType::Cookies)) { if (!first) std::cout << "+"; std::cout << "Cook"; first = false; }
     if (types.count(AssetType::WebData)) { if (!first) std::cout << "+"; std::cout << "Web"; first = false; }
     std::cout << ")" << std::endl;
+    
+    if (lower_narrow.find("cookies-journal") != std::string::npos) {
+        std::cout << "  Info: Cookies-journal access (auth request logging)" << std::endl;
+        std::cout << "  Action: Monitoring - LOW risk" << std::endl;
+        if (is_new_threat) {
+            std::cout << "========================================\n" << std::endl;
+        } else {
+            std::cout << std::endl;
+        }
+        return;
+    }
     
     if (event.asset_type == AssetType::LoginData) {
         std::cout << "========================================" << std::endl;
@@ -592,7 +965,7 @@ void CredentialMonitor::RecordAccess(uint32_t pid, const std::wstring& filepath)
     
     if (event.asset_type == AssetType::LocalState) {
         std::cout << "========================================" << std::endl;
-        std::cout << ">>> CRITICAL: ENCRYPTION KEY ACCESSED" << std::endl;
+        std::cout << ">>> CRITICAL: MASTER KEY ACCESSED" << std::endl;
         std::cout << ">>> TERMINATING IMMEDIATELY" << std::endl;
         if (KillProcess(pid)) {
             std::cout << ">>> SUCCESS: Process terminated (PID: " << pid << ")" << std::endl;
@@ -603,7 +976,33 @@ void CredentialMonitor::RecordAccess(uint32_t pid, const std::wstring& filepath)
         return;
     }
     
-    if (active_chains_[pid].risk_score >= 8) {
+    if (event.asset_type == AssetType::Cookies) {
+        std::cout << "========================================" << std::endl;
+        std::cout << ">>> CRITICAL: SESSION COOKIES ACCESSED" << std::endl;
+        std::cout << ">>> TERMINATING IMMEDIATELY" << std::endl;
+        if (KillProcess(pid)) {
+            std::cout << ">>> SUCCESS: Process terminated (PID: " << pid << ")" << std::endl;
+        } else {
+            std::cout << ">>> FAILURE: Could not terminate - attempting suspension" << std::endl;
+            
+            HANDLE hProcess = OpenProcess(PROCESS_SUSPEND_RESUME, FALSE, pid);
+            if (hProcess) {
+                typedef LONG (NTAPI *NtSuspendProcess)(IN HANDLE ProcessHandle);
+                NtSuspendProcess pfnNtSuspendProcess = (NtSuspendProcess)GetProcAddress(
+                    GetModuleHandleA("ntdll"), "NtSuspendProcess");
+                if (pfnNtSuspendProcess) {
+                    if (pfnNtSuspendProcess(hProcess) == 0) {
+                        std::cout << ">>> SUCCESS: Process suspended as fallback" << std::endl;
+                    }
+                }
+                CloseHandle(hProcess);
+            }
+        }
+        std::cout << "========================================\n" << std::endl;
+        return;
+    }
+    
+    if (active_chains_[pid].risk_score >= 7) {
         std::cout << "========================================" << std::endl;
         std::cout << ">>> HIGH RISK THRESHOLD EXCEEDED" << std::endl;
         std::cout << ">>> TERMINATING PROCESS" << std::endl;
@@ -773,10 +1172,17 @@ bool CredentialMonitor::IsProcessSuspicious(uint32_t pid) {
     
     // VPN Services
     if (path.find("nordvpn") != std::string::npos) return false;
+    if (path.find("nordupdater") != std::string::npos) return false;
+    if (path.find("nordupdate") != std::string::npos) return false;
     if (path.find("openvpn") != std::string::npos) return false;
     if (path.find("protonvpn") != std::string::npos) return false;
     if (path.find("expressvpn") != std::string::npos) return false;
     if (path.find("surfshark") != std::string::npos) return false;
+    
+    // Virtualization
+    if (path.find("vmware") != std::string::npos) return false;
+    if (path.find("virtualbox") != std::string::npos) return false;
+    if (path.find("hyper-v") != std::string::npos) return false;
     
     // Antivirus
     if (path.find("msmpeng") != std::string::npos) return false;
@@ -839,25 +1245,39 @@ int CredentialMonitor::CalculateRiskScore(const ThreatChain& chain) {
     int score = 0;
     
     std::set<AssetType> accessed_types;
+    bool has_journal = false;
+    
     for (const auto& event : chain.events) {
         accessed_types.insert(event.asset_type);
         if (event.is_decoy_hit) score += 10;
         
+        std::string lower = event.file_accessed;
+        std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+        if (lower.find("cookies-journal") != std::string::npos) {
+            has_journal = true;
+        }
+        
         if (event.asset_type == AssetType::LoginData) {
-            score += 20;
+            score += 50;
+        }
+        if (event.asset_type == AssetType::LocalState) {
+            score += 40;
         }
     }
     
+    if (has_journal && accessed_types.size() == 1 && accessed_types.count(AssetType::Cookies)) {
+        return 1;
+    }
+    
     if (accessed_types.count(AssetType::Cookies)) score += 3;
-    if (accessed_types.count(AssetType::LocalState)) score += 4;
     if (accessed_types.count(AssetType::WebData)) score += 2;
     
-    if (accessed_types.size() >= 2) score += 5;
+    if (accessed_types.size() >= 2) score += 3;
     if (accessed_types.size() >= 3) score += 5;
     
     auto duration = std::chrono::duration_cast<std::chrono::seconds>(
         chain.last_event - chain.first_event).count();
-    if (duration <= 30) score += 3;
+    if (duration <= 10) score += 2;
     
     return score;
 }

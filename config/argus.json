@@ -1,0 +1,101 @@
+{
+  "version": "2.0.0",
+  "phase": 2,
+  "mode": "observe",
+  "browsers": [
+    {
+      "id": "chrome",
+      "name": "Google Chrome",
+      "type": "chromium",
+      "enabled": true,
+      "profile_root": "%LOCALAPPDATA%\\Google\\Chrome\\User Data"
+    },
+    {
+      "id": "edge",
+      "name": "Microsoft Edge",
+      "type": "chromium",
+      "enabled": true,
+      "profile_root": "%LOCALAPPDATA%\\Microsoft\\Edge\\User Data"
+    },
+    {
+      "id": "brave",
+      "name": "Brave",
+      "type": "chromium",
+      "enabled": true,
+      "profile_root": "%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\User Data"
+    },
+    {
+      "id": "opera",
+      "name": "Opera",
+      "type": "chromium",
+      "enabled": true,
+      "profile_root": "%APPDATA%\\Opera Software\\Opera Stable"
+    },
+    {
+      "id": "opera_gx",
+      "name": "Opera GX",
+      "type": "chromium",
+      "enabled": true,
+      "profile_root": "%APPDATA%\\Opera Software\\Opera GX Stable"
+    },
+    {
+      "id": "vivaldi",
+      "name": "Vivaldi",
+      "type": "chromium",
+      "enabled": true,
+      "profile_root": "%LOCALAPPDATA%\\Vivaldi\\User Data"
+    },
+    {
+      "id": "comet",
+      "name": "Perplexity Comet",
+      "type": "chromium",
+      "enabled": true,
+      "profile_root": "%LOCALAPPDATA%\\Perplexity\\Comet\\User Data"
+    },
+    {
+      "id": "firefox",
+      "name": "Mozilla Firefox",
+      "type": "firefox",
+      "enabled": true,
+      "profile_root": "%APPDATA%\\Mozilla\\Firefox\\Profiles"
+    }
+  ],
+  "consent": {
+    "extension_scanning": false,
+    "network_monitoring": true,
+    "file_monitoring": true
+  },
+  "monitoring": {
+    "process_scan_interval_seconds": 5,
+    "network_scan_interval_seconds": 10,
+    "file_scan_interval_seconds": 15,
+    "extension_scan_interval_seconds": 300,
+    "main_loop_interval_seconds": 2,
+    "event_batch_size": 10
+  },
+  "risk_thresholds": {
+    "network_suspicious_connections": 2,
+    "network_high_risk_connections": 5
+  },
+  "whitelist": {
+    "_comment": "Domains are matched as suffixes (e.g., google.com matches *.google.com)",
+    "domains": [
+      "google.com",
+      "googleapis.com",
+      "gstatic.com",
+      "mozilla.org",
+      "mozilla.net",
+      "microsoft.com",
+      "windows.com"
+    ]
+  },
+  "blacklist": {
+    "domains": []
+  },
+  "logging": {
+    "enabled": true,
+    "directory": "logs",
+    "retention_days": 0,
+    "_comment": "retention_days: 0 = session-only, >0 = keep logs for N days"
+  }
+}

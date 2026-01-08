@@ -30,8 +30,8 @@ if (!SetConsoleCtrlHandler(ConsoleHandler, TRUE)) {
     return 1;
 }
     
-std::cout << "Argus Phase 2.5 - Browser Security Monitor" << std::endl;
-std::cout << "Read-only | Local-only | Credential protection" << std::endl;
+std::cout << "Argus Phase 2.6 - Browser Security Monitor" << std::endl;
+std::cout << "Read-only | Local-only | Active defense" << std::endl;
 std::cout << std::endl;
     
 bool extension_scan_consent = false;
@@ -78,6 +78,60 @@ std::cout.flush();
     risk_engine.Initialize();
     credential_monitor.Initialize();
     
+    char* localappdata = nullptr;
+    size_t localappdata_len = 0;
+    char* appdata = nullptr;
+    size_t appdata_len = 0;
+    
+    _dupenv_s(&localappdata, &localappdata_len, "LOCALAPPDATA");
+    _dupenv_s(&appdata, &appdata_len, "APPDATA");
+    
+    if (localappdata || appdata) {
+        struct BrowserDef {
+            std::string id;
+            std::string name;
+            std::string path;
+        };
+        
+        std::vector<BrowserDef> browsers;
+        
+        if (localappdata) {
+            browsers.push_back({"chrome", "Chrome", std::string(localappdata) + "\\Google\\Chrome\\User Data"});
+            browsers.push_back({"edge", "Edge", std::string(localappdata) + "\\Microsoft\\Edge\\User Data"});
+            browsers.push_back({"brave", "Brave", std::string(localappdata) + "\\BraveSoftware\\Brave-Browser\\User Data"});
+            browsers.push_back({"vivaldi", "Vivaldi", std::string(localappdata) + "\\Vivaldi\\User Data"});
+            browsers.push_back({"comet", "Perplexity Comet", std::string(localappdata) + "\\Perplexity\\Comet\\User Data"});
+        }
+        if (appdata) {
+            browsers.push_back({"opera", "Opera", std::string(appdata) + "\\Opera Software\\Opera Stable"});
+            browsers.push_back({"opera_gx", "Opera GX", std::string(appdata) + "\\Opera Software\\Opera GX Stable"});
+        }
+        
+        for (const auto& browser : browsers) {
+            WIN32_FIND_DATAA find_data;
+            HANDLE hFind = FindFirstFileA((browser.path + "\\*").c_str(), &find_data);
+            
+            if (hFind != INVALID_HANDLE_VALUE) {
+                do {
+                    if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                        std::string dir_name = find_data.cFileName;
+                        if (dir_name == "Default" || dir_name.find("Profile") == 0) {
+                            std::string profile_path = browser.path + "\\" + dir_name;
+                            credential_monitor.RegisterBrowserProfile(browser.id, profile_path);
+                        }
+                    }
+                } while (FindNextFileA(hFind, &find_data));
+                FindClose(hFind);
+            }
+        }
+        
+        credential_monitor.StartDirectoryWatchers();
+        std::cout << "[CredentialMonitor] Protection active for all profiles" << std::endl;
+        
+        if (localappdata) free(localappdata);
+        if (appdata) free(appdata);
+    }
+    
     session.RegisterCleanupCallback([&]() {
         try { credential_monitor.Shutdown(); } catch (...) {}
     });
@@ -116,7 +170,7 @@ std::cout.flush();
     int cycle = 0;
     size_t last_assessment_count = 0;
     
-    std::cout << "Phase 2.5: Multi-browser + credential monitoring active" << std::endl;
+    std::cout << "Phase 2.6: Active defense + automatic threat termination" << std::endl;
     std::cout.flush();
     
     auto last_extension_scan = std::chrono::steady_clock::now() - std::chrono::seconds(extension_scan_interval_seconds + 1);

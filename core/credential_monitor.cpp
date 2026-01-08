@@ -118,7 +118,7 @@ DWORD WINAPI CredentialMonitor::WatcherThread(LPVOID param) {
             buffer,
             sizeof(buffer),
             TRUE,
-            FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_SIZE,
+            FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE | FILE_NOTIFY_CHANGE_SIZE,
             &bytesReturned,
             &overlapped,
             NULL
@@ -128,7 +128,7 @@ DWORD WINAPI CredentialMonitor::WatcherThread(LPVOID param) {
             break;
         }
         
-        DWORD waitResult = WaitForSingleObject(overlapped.hEvent, 500);
+        DWORD waitResult = WaitForSingleObject(overlapped.hEvent, 100);
         
         if (waitResult == WAIT_OBJECT_0) {
             if (GetOverlappedResult(hDir, &overlapped, &bytesReturned, FALSE)) {
@@ -136,64 +136,57 @@ DWORD WINAPI CredentialMonitor::WatcherThread(LPVOID param) {
                     FILE_NOTIFY_INFORMATION* info = (FILE_NOTIFY_INFORMATION*)buffer;
                     
                     do {
-                        if (info->Action == FILE_ACTION_ADDED ||
-                            info->Action == FILE_ACTION_MODIFIED ||
-                            info->Action == FILE_ACTION_RENAMED_NEW_NAME) {
+                        std::wstring filename(info->FileName, info->FileNameLength / sizeof(WCHAR));
+                        std::wstring fullPath = wDirectory + L"\\" + filename;
+                        
+                        std::wstring lower = fullPath;
+                        std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
+                        
+                        if (lower.find(L"login data") != std::wstring::npos ||
+                            lower.find(L"cookies") != std::wstring::npos ||
+                            lower.find(L"local state") != std::wstring::npos ||
+                            lower.find(L"web data") != std::wstring::npos) {
                             
-                            std::wstring filename(info->FileName, info->FileNameLength / sizeof(WCHAR));
-                            std::wstring fullPath = wDirectory + L"\\" + filename;
-                            
-                            std::wstring lower = fullPath;
-                            std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
-                            
-                            if (lower.find(L"login data") != std::wstring::npos ||
-                                lower.find(L"cookies") != std::wstring::npos ||
-                                lower.find(L"local state") != std::wstring::npos ||
-                                lower.find(L"web data") != std::wstring::npos) {
+                            std::vector<uint32_t> recent_pids;
+                            HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+                            if (snapshot != INVALID_HANDLE_VALUE) {
+                                PROCESSENTRY32W pe32;
+                                pe32.dwSize = sizeof(PROCESSENTRY32W);
                                 
-                                Sleep(50);
-                                
-                                std::vector<uint32_t> recent_pids;
-                                HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-                                if (snapshot != INVALID_HANDLE_VALUE) {
-                                    PROCESSENTRY32W pe32;
-                                    pe32.dwSize = sizeof(PROCESSENTRY32W);
-                                    
-                                    if (Process32FirstW(snapshot, &pe32)) {
-                                        do {
-                                            if (s_instance->IsProcessSuspicious(pe32.th32ProcessID)) {
-                                                HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe32.th32ProcessID);
-                                                if (hProcess) {
-                                                    FILETIME createTime, exitTime, kernelTime, userTime;
-                                                    if (GetProcessTimes(hProcess, &createTime, &exitTime, &kernelTime, &userTime)) {
-                                                        ULARGE_INTEGER create;
-                                                        create.LowPart = createTime.dwLowDateTime;
-                                                        create.HighPart = createTime.dwHighDateTime;
-                                                        
-                                                        FILETIME nowFT;
-                                                        GetSystemTimeAsFileTime(&nowFT);
-                                                        ULARGE_INTEGER now;
-                                                        now.LowPart = nowFT.dwLowDateTime;
-                                                        now.HighPart = nowFT.dwHighDateTime;
-                                                        
-                                                        uint64_t age_seconds = (now.QuadPart - create.QuadPart) / 10000000ULL;
-                                                        if (age_seconds < 10) {
-                                                            recent_pids.push_back(pe32.th32ProcessID);
-                                                        }
+                                if (Process32FirstW(snapshot, &pe32)) {
+                                    do {
+                                        if (s_instance->IsProcessSuspicious(pe32.th32ProcessID)) {
+                                            HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe32.th32ProcessID);
+                                            if (hProcess) {
+                                                FILETIME createTime, exitTime, kernelTime, userTime;
+                                                if (GetProcessTimes(hProcess, &createTime, &exitTime, &kernelTime, &userTime)) {
+                                                    ULARGE_INTEGER create;
+                                                    create.LowPart = createTime.dwLowDateTime;
+                                                    create.HighPart = createTime.dwHighDateTime;
+                                                    
+                                                    FILETIME nowFT;
+                                                    GetSystemTimeAsFileTime(&nowFT);
+                                                    ULARGE_INTEGER now;
+                                                    now.LowPart = nowFT.dwLowDateTime;
+                                                    now.HighPart = nowFT.dwHighDateTime;
+                                                    
+                                                    uint64_t age_seconds = (now.QuadPart - create.QuadPart) / 10000000ULL;
+                                                    if (age_seconds < 5) {
+                                                        recent_pids.push_back(pe32.th32ProcessID);
                                                     }
-                                                    CloseHandle(hProcess);
                                                 }
+                                                CloseHandle(hProcess);
                                             }
-                                        } while (Process32NextW(snapshot, &pe32) && recent_pids.size() < 5);
-                                    }
-                                    CloseHandle(snapshot);
+                                        }
+                                    } while (Process32NextW(snapshot, &pe32) && recent_pids.size() < 3);
                                 }
-                                
-                                if (!recent_pids.empty()) {
-                                    for (uint32_t pid : recent_pids) {
-                                        std::lock_guard<std::mutex> lock(s_instance->chains_mutex_);
-                                        s_instance->RecordAccess(pid, fullPath);
-                                    }
+                                CloseHandle(snapshot);
+                            }
+                            
+                            if (!recent_pids.empty()) {
+                                for (uint32_t pid : recent_pids) {
+                                    std::lock_guard<std::mutex> lock(s_instance->chains_mutex_);
+                                    s_instance->RecordAccess(pid, fullPath);
                                 }
                             }
                         }
@@ -521,6 +514,7 @@ void CredentialMonitor::RecordAccess(uint32_t pid, const std::wstring& filepath)
     event.is_browser_process = false;
     event.is_decoy_hit = false;
     
+    bool is_new_threat = false;
     if (active_chains_.find(pid) == active_chains_.end()) {
         ThreatChain chain;
         chain.pid = pid;
@@ -530,6 +524,7 @@ void CredentialMonitor::RecordAccess(uint32_t pid, const std::wstring& filepath)
         chain.risk_score = 0;
         chain.reported = false;
         active_chains_[pid] = chain;
+        is_new_threat = true;
         
         std::cout << "\n!!! CREDENTIAL THEFT DETECTED !!!" << std::endl;
         std::cout << "========================================" << std::endl;
@@ -545,35 +540,111 @@ void CredentialMonitor::RecordAccess(uint32_t pid, const std::wstring& filepath)
             default: std::cout << "BROWSER DATA"; break;
         }
         std::cout << std::endl;
-        std::cout << "========================================\n" << std::endl;
+    } else {
+        std::cout << "\n[THREAT UPDATE] PID " << pid << " accessed: " << filepath_narrow << std::endl;
     }
     
     active_chains_[pid].events.push_back(event);
     active_chains_[pid].last_event = now;
+    int old_score = active_chains_[pid].risk_score;
     active_chains_[pid].risk_score = CalculateRiskScore(active_chains_[pid]);
     
-    if (active_chains_[pid].risk_score >= 10) {
-        std::cout << ">>> TERMINATING MALICIOUS PROCESS (Score: " << active_chains_[pid].risk_score << ")" << std::endl;
+    std::cout << "  Files accessed: " << active_chains_[pid].events.size() << std::endl;
+    std::cout << "  Risk score: " << old_score << " -> " << active_chains_[pid].risk_score;
+    
+    std::set<AssetType> types;
+    for (const auto& evt : active_chains_[pid].events) {
+        types.insert(evt.asset_type);
+    }
+    std::cout << " (";
+    bool first = true;
+    if (types.count(AssetType::LoginData)) { if (!first) std::cout << "+"; std::cout << "Pass"; first = false; }
+    if (types.count(AssetType::LocalState)) { if (!first) std::cout << "+"; std::cout << "Key"; first = false; }
+    if (types.count(AssetType::Cookies)) { if (!first) std::cout << "+"; std::cout << "Cook"; first = false; }
+    if (types.count(AssetType::WebData)) { if (!first) std::cout << "+"; std::cout << "Web"; first = false; }
+    std::cout << ")" << std::endl;
+    
+    if (event.asset_type == AssetType::LoginData) {
+        std::cout << "========================================" << std::endl;
+        std::cout << ">>> CRITICAL: PASSWORD FILE ACCESSED" << std::endl;
+        std::cout << ">>> TERMINATING IMMEDIATELY (no scoring needed)" << std::endl;
         if (KillProcess(pid)) {
-            std::cout << ">>> Process terminated successfully" << std::endl;
+            std::cout << ">>> SUCCESS: Process terminated (PID: " << pid << ")" << std::endl;
         } else {
-            std::cout << ">>> Failed to terminate process (may require admin)" << std::endl;
+            std::cout << ">>> FAILURE: Could not terminate - attempting suspension" << std::endl;
+            
+            HANDLE hProcess = OpenProcess(PROCESS_SUSPEND_RESUME, FALSE, pid);
+            if (hProcess) {
+                typedef LONG (NTAPI *NtSuspendProcess)(IN HANDLE ProcessHandle);
+                NtSuspendProcess pfnNtSuspendProcess = (NtSuspendProcess)GetProcAddress(
+                    GetModuleHandleA("ntdll"), "NtSuspendProcess");
+                if (pfnNtSuspendProcess) {
+                    if (pfnNtSuspendProcess(hProcess) == 0) {
+                        std::cout << ">>> SUCCESS: Process suspended as fallback" << std::endl;
+                    }
+                }
+                CloseHandle(hProcess);
+            }
         }
-        std::cout << std::endl;
+        std::cout << "========================================\n" << std::endl;
+        return;
+    }
+    
+    if (event.asset_type == AssetType::LocalState) {
+        std::cout << "========================================" << std::endl;
+        std::cout << ">>> CRITICAL: ENCRYPTION KEY ACCESSED" << std::endl;
+        std::cout << ">>> TERMINATING IMMEDIATELY" << std::endl;
+        if (KillProcess(pid)) {
+            std::cout << ">>> SUCCESS: Process terminated (PID: " << pid << ")" << std::endl;
+        } else {
+            std::cout << ">>> FAILURE: Termination denied" << std::endl;
+        }
+        std::cout << "========================================\n" << std::endl;
+        return;
+    }
+    
+    if (active_chains_[pid].risk_score >= 8) {
+        std::cout << "========================================" << std::endl;
+        std::cout << ">>> HIGH RISK THRESHOLD EXCEEDED" << std::endl;
+        std::cout << ">>> TERMINATING PROCESS" << std::endl;
+        if (KillProcess(pid)) {
+            std::cout << ">>> SUCCESS: Process terminated (PID: " << pid << ")" << std::endl;
+        } else {
+            std::cout << ">>> FAILURE: Could not terminate" << std::endl;
+        }
+        std::cout << "========================================\n" << std::endl;
+    } else {
+        std::cout << "  Action: Monitoring (threshold not reached)" << std::endl;
+        if (!is_new_threat) {
+            std::cout << std::endl;
+        }
+    }
+    
+    if (is_new_threat) {
+        std::cout << "========================================\n" << std::endl;
     }
 }
 
 bool CredentialMonitor::KillProcess(uint32_t pid) {
     HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, pid);
     if (!hProcess) {
-        return false;
+        hProcess = OpenProcess(PROCESS_ALL_ACCESS, FALSE, pid);
+        if (!hProcess) {
+            return false;
+        }
     }
     
     BOOL result = TerminateProcess(hProcess, 1);
     CloseHandle(hProcess);
     
     if (result) {
-        active_chains_.erase(pid);
+        Sleep(50);
+        HANDLE hCheck = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, pid);
+        if (!hCheck) {
+            active_chains_.erase(pid);
+            return true;
+        }
+        CloseHandle(hCheck);
     }
     
     return result != 0;
@@ -612,6 +683,7 @@ bool CredentialMonitor::IsProcessSuspicious(uint32_t pid) {
     if (path.find("firefox.exe") != std::string::npos) return false;
     if (path.find("brave.exe") != std::string::npos) return false;
     if (path.find("opera.exe") != std::string::npos) return false;
+    if (path.find("opera gx.exe") != std::string::npos) return false;
     if (path.find("vivaldi.exe") != std::string::npos) return false;
     if (path.find("comet.exe") != std::string::npos) return false;
     
@@ -624,37 +696,94 @@ bool CredentialMonitor::IsProcessSuspicious(uint32_t pid) {
     if (path.find("servicehub") != std::string::npos) return false;
     if (path.find("vctip.exe") != std::string::npos) return false;
     if (path.find("perfwatson") != std::string::npos) return false;
+    if (path.find("vshost.exe") != std::string::npos) return false;
+    if (path.find("dotnet.exe") != std::string::npos) return false;
+    if (path.find("powershell.exe") != std::string::npos) return false;
+    if (path.find("pwsh.exe") != std::string::npos) return false;
+    if (path.find("git.exe") != std::string::npos) return false;
+    if (path.find("githubdesktop.exe") != std::string::npos) return false;
+    if (path.find("sqlwriter.exe") != std::string::npos) return false;
+    if (path.find("diagnosticshub") != std::string::npos) return false;
+    if (path.find("standardcollector") != std::string::npos) return false;
+    if (path.find("codex.exe") != std::string::npos) return false;
+    if (path.find(".vscode") != std::string::npos) return false;
     
-    // NVIDIA
+    // Graphics/GPU
     if (path.find("nvcontainer.exe") != std::string::npos) return false;
     if (path.find("nvsphelper") != std::string::npos) return false;
     if (path.find("nvidia") != std::string::npos) return false;
+    if (path.find("radeonsoftware") != std::string::npos) return false;
+    if (path.find("amdryzenmaster") != std::string::npos) return false;
+    if (path.find("intelgraphics") != std::string::npos) return false;
     
-    // Hardware/RGB
+    // Hardware/RGB/Peripherals
     if (path.find("openrgb.exe") != std::string::npos) return false;
     if (path.find("fancontrol.exe") != std::string::npos) return false;
     if (path.find("steelseries") != std::string::npos) return false;
+    if (path.find("redragon") != std::string::npos) return false;
+    if (path.find("mouse drive") != std::string::npos) return false;
+    if (path.find("corsair") != std::string::npos) return false;
+    if (path.find("razer") != std::string::npos) return false;
+    if (path.find("logitech") != std::string::npos) return false;
     
     // Communication
     if (path.find("discord.exe") != std::string::npos) return false;
     if (path.find("discordsystemhelper") != std::string::npos) return false;
     if (path.find("discord_updater") != std::string::npos) return false;
-    if (path.find("teams.exe") != std::string::npos) return false;
     if (path.find("slack.exe") != std::string::npos) return false;
+    if (path.find("teams.exe") != std::string::npos) return false;
+    if (path.find("skype.exe") != std::string::npos) return false;
+    if (path.find("zoom.exe") != std::string::npos) return false;
+    if (path.find("signal.exe") != std::string::npos) return false;
+    if (path.find("telegram.exe") != std::string::npos) return false;
     
     // Gaming
     if (path.find("steam.exe") != std::string::npos) return false;
+    if (path.find("steamservice") != std::string::npos) return false;
     if (path.find("steamwebhelper") != std::string::npos) return false;
+    if (path.find("epicgameslauncher") != std::string::npos) return false;
+    if (path.find("ubisoftconnect") != std::string::npos) return false;
+    if (path.find("origin.exe") != std::string::npos) return false;
     if (path.find("riotclient") != std::string::npos) return false;
+    if (path.find("battle.net") != std::string::npos) return false;
+    if (path.find("goggalaxy") != std::string::npos) return false;
     if (path.find("wallpaper64.exe") != std::string::npos) return false;
     
     // Music/Media
     if (path.find("spotify.exe") != std::string::npos) return false;
+    if (path.find("spotifywebhelper") != std::string::npos) return false;
+    if (path.find("itunes.exe") != std::string::npos) return false;
+    if (path.find("vlc.exe") != std::string::npos) return false;
+    if (path.find("foobar2000") != std::string::npos) return false;
+    if (path.find("potplayer") != std::string::npos) return false;
+    if (path.find("mediamonkey") != std::string::npos) return false;
+    
+    // Utilities
+    if (path.find("7z.exe") != std::string::npos) return false;
+    if (path.find("winrar.exe") != std::string::npos) return false;
+    if (path.find("notepad.exe") != std::string::npos) return false;
+    if (path.find("notepad++") != std::string::npos) return false;
+    if (path.find("sumatrapdf") != std::string::npos) return false;
+    if (path.find("paint.net") != std::string::npos) return false;
+    if (path.find("gimp") != std::string::npos) return false;
+    if (path.find("photoshop") != std::string::npos) return false;
+    if (path.find("lightroom") != std::string::npos) return false;
+    if (path.find("blender") != std::string::npos) return false;
+    if (path.find("everything.exe") != std::string::npos) return false;
     
     // VPN Services
     if (path.find("nordvpn") != std::string::npos) return false;
     if (path.find("openvpn") != std::string::npos) return false;
     if (path.find("protonvpn") != std::string::npos) return false;
+    if (path.find("expressvpn") != std::string::npos) return false;
+    if (path.find("surfshark") != std::string::npos) return false;
+    
+    // Antivirus
+    if (path.find("msmpeng") != std::string::npos) return false;
+    if (path.find("avast") != std::string::npos) return false;
+    if (path.find("avira") != std::string::npos) return false;
+    if (path.find("kaspersky") != std::string::npos) return false;
+    if (path.find("bitdefender") != std::string::npos) return false;
     
     // Argus itself
     if (path.find("argus.exe") != std::string::npos) return false;
@@ -680,6 +809,8 @@ bool CredentialMonitor::IsProcessSuspicious(uint32_t pid) {
     if (path.find("securityhealth") != std::string::npos) return false;
     if (path.find("taskhostw") != std::string::npos) return false;
     if (path.find("conhost") != std::string::npos) return false;
+    if (path.find("backgroundtaskhost") != std::string::npos) return false;
+    if (path.find("taskmgr") != std::string::npos) return false;
     
     return true;
 }
@@ -711,10 +842,13 @@ int CredentialMonitor::CalculateRiskScore(const ThreatChain& chain) {
     for (const auto& event : chain.events) {
         accessed_types.insert(event.asset_type);
         if (event.is_decoy_hit) score += 10;
+        
+        if (event.asset_type == AssetType::LoginData) {
+            score += 20;
+        }
     }
     
     if (accessed_types.count(AssetType::Cookies)) score += 3;
-    if (accessed_types.count(AssetType::LoginData)) score += 5;
     if (accessed_types.count(AssetType::LocalState)) score += 4;
     if (accessed_types.count(AssetType::WebData)) score += 2;
     

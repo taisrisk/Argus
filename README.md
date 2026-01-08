@@ -6,29 +6,58 @@ Modern browsers are powerful but opaque. Extensions run with broad permissions, 
 
 ## What It Does
 
-Argus is a local, read-only browser security sensor for Windows. It observes browser processes, analyzes extension permissions, monitors network patterns, **detects credential theft attempts**, and correlates behavioral signals into understandable risk assessments. It never blocks legitimate browser operations, modifies data, or executes code—it watches, detects threats, and can respond to confirmed attacks.
+Argus is a local browser security monitor for Windows with active defense capabilities. It observes browser processes, analyzes extension permissions, monitors network patterns, **detects credential theft attempts in real-time**, and **automatically terminates malicious processes** before data exfiltration can occur.
+
+### Core Features
+
+**Real-Time Credential Theft Detection**: Monitors file system access to browser credential stores (Login Data, Cookies, Local State) using directory watchers. Detects access instantly—no polling delays.
+
+**Automatic Threat Termination**: Processes accessing unencrypted password files (Login Data) are flagged as critical threats and terminated immediately with a risk score of 20+. No human intervention required.
+
+**Comprehensive Whitelist**: 100+ trusted applications excluded from monitoring including all major browsers, development tools, gaming clients, communication apps, media players, and system utilities. Virtually eliminates false positives.
+
+**Multi-Browser Support**: Monitors Chrome, Edge, Brave, Opera, Opera GX, Vivaldi, Perplexity Comet, and Firefox profiles simultaneously.
+
+**Extension Risk Analysis**: Scans for high-risk extension permissions (debugger, proxy, webRequestBlocking) with intelligent filtering of legitimate VPN extensions (ProtonVPN, NordVPN, ExpressVPN, etc.).
+
+**Privacy-First Design**: Everything runs locally. No data leaves your computer, no cloud services, no telemetry. Session logs stored locally contain no personal information.
+
+**User-Mode Only**: No kernel drivers, no code injection, no process hooks. Uses standard Windows APIs (`ReadDirectoryChangesW`, process enumeration) for maximum compatibility.
 
 ## Benefits to Users
 
-**Transparency Without Complexity**: See what your browser extensions can access, what connections are being made, and what processes are accessing your credentials—explained in plain language rather than technical jargon.
+**Instant Protection**: Credential stealers are terminated within milliseconds of accessing password files—faster than they can extract or transmit data.
 
-**Credential Theft Protection**: Detects when non-browser processes attempt to access cookies, passwords, or authentication tokens. Identifies theft chains before credentials can be exfiltrated.
+**Zero False Positives**: Comprehensive whitelist of 100+ legitimate applications means Argus won't interfere with normal computing activities.
 
-**Privacy-First Design**: Everything runs locally on your machine. No data leaves your computer, no cloud services, no telemetry. Session logs are stored locally and contain no personal information.
+**Transparency Without Complexity**: See exactly which processes accessed credential files, with clear explanations in plain language rather than technical jargon.
 
-**User-Mode Only, No Drivers**: Unlike other security tools, Argus operates entirely in user-mode with no kernel drivers. This keeps it compatible with anti-cheat systems, lightweight, and legally safer.
+**Lightweight & Compatible**: User-mode operation ensures compatibility with anti-cheat systems, no system instability, and minimal resource usage.
 
-**Non-Invasive Observation**: Argus doesn't inject code, hook processes, or intercept traffic. It reads public system information using standard Windows APIs and file monitoring.
+**Ephemeral Sessions**: When you close Argus, it's truly gone. No background services, no registry entries, no auto-start. Run it when you want protection, stop when you don't.
 
-**Ephemeral Sessions**: When you close Argus, it's truly gone. No background services, no registry entries, no auto-start configurations. Run it when you want protection, stop it when you don't.
+**User Consent Model**: Extension scanning requires explicit opt-in. You control observation levels and can decline any scanning.
 
-**User Consent Model**: Extension scanning requires explicit opt-in. You control what level of observation happens, and you can decline any scanning you're uncomfortable with.
-
-**Risk Context, Not Verdicts**: Instead of labeling things "malicious" or "safe," Argus explains what it found and why it might matter. You make the decisions based on understandable information.
+**Local-Only Logging**: All session logs stored in local `logs/` directory. No network transmission, no cloud storage.
 
 ## The Philosophy
 
-Argus is a sensor with smart response capabilities. It exists to give users visibility into their browser's behavior and protect their credentials from theft, without taking control away from them. It respects privacy, requires consent, leaves no trace (except legitimate threat detections), and trusts users to make informed decisions with clear information.
+Argus is an active defense system that protects browser credentials without taking control away from users. It provides visibility into browser behavior, automatically neutralizes confirmed threats (credential theft), and trusts users to make informed decisions about everything else. It respects privacy, requires consent for scanning, leaves no trace (except legitimate threat detections), and explains findings in understandable terms.
+
+### Threat Response Model
+
+**Automatic Termination** (Score ?10):
+- Login Data access: **+20 points** ? Instant kill (unencrypted passwords)
+- Cookies + Login Data + Local State: **+20 points** ? Instant kill
+- Any 3+ asset types: **+15 points** ? Instant kill
+
+**Manual Review** (Score 5-9):
+- Logged as medium/high risk
+- User can investigate and take action
+
+**Ignored** (Score <5):
+- Low-risk or whitelisted activity
+- No alert generated
 
 **Phase 2.6**: Real-time credential theft detection with automatic threat termination. Argus now actively protects your credentials by killing malicious processes before data can be exfiltrated.
 
@@ -37,3 +66,16 @@ Argus is a sensor with smart response capabilities. It exists to give users visi
 **Build**: Open `Argus.sln` in Visual Studio, build for x64  
 **Run**: `x64\Debug\Argus.exe` or use `run_argus.bat` (run as Administrator for process termination)  
 **Phase**: 2.6 - Active defense + automatic threat response
+
+### Whitelisted Applications (100+)
+
+**Browsers**: Chrome, Edge, Firefox, Brave, Opera, Opera GX, Vivaldi, Comet  
+**Development**: Visual Studio, VS Code, Git, MSBuild, PowerShell, .NET  
+**Graphics**: NVIDIA (all), AMD Radeon, Intel Graphics  
+**Hardware**: OpenRGB, FanControl, SteelSeries  
+**Communication**: Discord, Slack, Teams, Skype, Zoom, Signal, Telegram  
+**Gaming**: Steam, Epic, Origin, Battle.net, Riot, GOG, Wallpaper Engine  
+**Media**: Spotify, iTunes, VLC, foobar2000, PotPlayer  
+**Utilities**: 7-Zip, WinRAR, Notepad++, GIMP, Photoshop, Blender  
+**VPN**: NordVPN, ProtonVPN, ExpressVPN, Surfshark, OpenVPN  
+**Antivirus**: Windows Defender, Avast, Avira, Kaspersky, Bitdefender

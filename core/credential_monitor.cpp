@@ -61,6 +61,11 @@ bool CredentialMonitor::Initialize() {
         return false;
     }
     
+    // Load process whitelist from config
+    if (!process_whitelist_.LoadFromFile("config/process_whitelist.json")) {
+        std::cerr << "[CredentialMonitor] Warning: Using fallback whitelist" << std::endl;
+    }
+    
     is_active_ = true;
     etw_running_ = true;
     last_check_ = std::chrono::system_clock::now();
@@ -1088,157 +1093,16 @@ std::string CredentialMonitor::GetProcessPath(uint32_t pid) {
 }
 
 bool CredentialMonitor::IsProcessSuspicious(uint32_t pid) {
+    // System processes and self
     if (pid == 0 || pid == 4 || pid == GetCurrentProcessId()) return false;
     if (pid < 500) return false;
     
+    // Get process path
     std::string path = GetProcessPath(pid);
     if (path.find("Unknown") != std::string::npos) return false;
     
-    std::transform(path.begin(), path.end(), path.begin(), ::tolower);
-    
-    // Browsers
-    if (path.find("chrome.exe") != std::string::npos) return false;
-    if (path.find("msedge.exe") != std::string::npos) return false;
-    if (path.find("firefox.exe") != std::string::npos) return false;
-    if (path.find("brave.exe") != std::string::npos) return false;
-    if (path.find("opera.exe") != std::string::npos) return false;
-    if (path.find("opera gx.exe") != std::string::npos) return false;
-    if (path.find("vivaldi.exe") != std::string::npos) return false;
-    if (path.find("comet.exe") != std::string::npos) return false;
-    
-    // Development Tools
-    if (path.find("devenv.exe") != std::string::npos) return false;
-    if (path.find("code.exe") != std::string::npos) return false;
-    if (path.find("codehelper.exe") != std::string::npos) return false;
-    if (path.find("msbuild.exe") != std::string::npos) return false;
-    if (path.find("vcpkgsrv.exe") != std::string::npos) return false;
-    if (path.find("servicehub") != std::string::npos) return false;
-    if (path.find("vctip.exe") != std::string::npos) return false;
-    if (path.find("perfwatson") != std::string::npos) return false;
-    if (path.find("vshost.exe") != std::string::npos) return false;
-    if (path.find("dotnet.exe") != std::string::npos) return false;
-    if (path.find("powershell.exe") != std::string::npos) return false;
-    if (path.find("pwsh.exe") != std::string::npos) return false;
-    if (path.find("git.exe") != std::string::npos) return false;
-    if (path.find("githubdesktop.exe") != std::string::npos) return false;
-    if (path.find("sqlwriter.exe") != std::string::npos) return false;
-    if (path.find("diagnosticshub") != std::string::npos) return false;
-    if (path.find("standardcollector") != std::string::npos) return false;
-    if (path.find("codex.exe") != std::string::npos) return false;
-    if (path.find(".vscode") != std::string::npos) return false;
-    
-    // Graphics/GPU
-    if (path.find("nvcontainer.exe") != std::string::npos) return false;
-    if (path.find("nvsphelper") != std::string::npos) return false;
-    if (path.find("nvidia") != std::string::npos) return false;
-    if (path.find("radeonsoftware") != std::string::npos) return false;
-    if (path.find("amdryzenmaster") != std::string::npos) return false;
-    if (path.find("intelgraphics") != std::string::npos) return false;
-    
-    // Hardware/RGB/Peripherals
-    if (path.find("openrgb.exe") != std::string::npos) return false;
-    if (path.find("fancontrol.exe") != std::string::npos) return false;
-    if (path.find("steelseries") != std::string::npos) return false;
-    if (path.find("redragon") != std::string::npos) return false;
-    if (path.find("mouse drive") != std::string::npos) return false;
-    if (path.find("corsair") != std::string::npos) return false;
-    if (path.find("razer") != std::string::npos) return false;
-    if (path.find("logitech") != std::string::npos) return false;
-    
-    // Communication
-    if (path.find("discord.exe") != std::string::npos) return false;
-    if (path.find("discordsystemhelper") != std::string::npos) return false;
-    if (path.find("discord_updater") != std::string::npos) return false;
-    if (path.find("slack.exe") != std::string::npos) return false;
-    if (path.find("teams.exe") != std::string::npos) return false;
-    if (path.find("skype.exe") != std::string::npos) return false;
-    if (path.find("zoom.exe") != std::string::npos) return false;
-    if (path.find("signal.exe") != std::string::npos) return false;
-    if (path.find("telegram.exe") != std::string::npos) return false;
-    
-    // Gaming
-    if (path.find("steam.exe") != std::string::npos) return false;
-    if (path.find("steamservice") != std::string::npos) return false;
-    if (path.find("steamwebhelper") != std::string::npos) return false;
-    if (path.find("epicgameslauncher") != std::string::npos) return false;
-    if (path.find("ubisoftconnect") != std::string::npos) return false;
-    if (path.find("origin.exe") != std::string::npos) return false;
-    if (path.find("riotclient") != std::string::npos) return false;
-    if (path.find("battle.net") != std::string::npos) return false;
-    if (path.find("goggalaxy") != std::string::npos) return false;
-    if (path.find("wallpaper64.exe") != std::string::npos) return false;
-    
-    // Music/Media
-    if (path.find("spotify.exe") != std::string::npos) return false;
-    if (path.find("spotifywebhelper") != std::string::npos) return false;
-    if (path.find("itunes.exe") != std::string::npos) return false;
-    if (path.find("vlc.exe") != std::string::npos) return false;
-    if (path.find("foobar2000") != std::string::npos) return false;
-    if (path.find("potplayer") != std::string::npos) return false;
-    if (path.find("mediamonkey") != std::string::npos) return false;
-    
-    // Utilities
-    if (path.find("7z.exe") != std::string::npos) return false;
-    if (path.find("winrar.exe") != std::string::npos) return false;
-    if (path.find("notepad.exe") != std::string::npos) return false;
-    if (path.find("notepad++") != std::string::npos) return false;
-    if (path.find("sumatrapdf") != std::string::npos) return false;
-    if (path.find("paint.net") != std::string::npos) return false;
-    if (path.find("gimp") != std::string::npos) return false;
-    if (path.find("photoshop") != std::string::npos) return false;
-    if (path.find("lightroom") != std::string::npos) return false;
-    if (path.find("blender") != std::string::npos) return false;
-    if (path.find("everything.exe") != std::string::npos) return false;
-    
-    // VPN Services
-    if (path.find("nordvpn") != std::string::npos) return false;
-    if (path.find("nordupdater") != std::string::npos) return false;
-    if (path.find("nordupdate") != std::string::npos) return false;
-    if (path.find("openvpn") != std::string::npos) return false;
-    if (path.find("protonvpn") != std::string::npos) return false;
-    if (path.find("expressvpn") != std::string::npos) return false;
-    if (path.find("surfshark") != std::string::npos) return false;
-    
-    // Virtualization
-    if (path.find("vmware") != std::string::npos) return false;
-    if (path.find("virtualbox") != std::string::npos) return false;
-    if (path.find("hyper-v") != std::string::npos) return false;
-    
-    // Antivirus
-    if (path.find("msmpeng") != std::string::npos) return false;
-    if (path.find("avast") != std::string::npos) return false;
-    if (path.find("avira") != std::string::npos) return false;
-    if (path.find("kaspersky") != std::string::npos) return false;
-    if (path.find("bitdefender") != std::string::npos) return false;
-    
-    // Argus itself
-    if (path.find("argus.exe") != std::string::npos) return false;
-    
-    // Windows System
-    if (path.find("system32") != std::string::npos) return false;
-    if (path.find("\\windows\\") != std::string::npos) return false;
-    if (path.find("\\microsoft\\") != std::string::npos) return false;
-    if (path.find("windowsapps") != std::string::npos) return false;
-    if (path.find("svchost") != std::string::npos) return false;
-    if (path.find("csrss") != std::string::npos) return false;
-    if (path.find("lsass") != std::string::npos) return false;
-    if (path.find("services") != std::string::npos) return false;
-    if (path.find("smss") != std::string::npos) return false;
-    if (path.find("wininit") != std::string::npos) return false;
-    if (path.find("dwm") != std::string::npos) return false;
-    if (path.find("explorer.exe") != std::string::npos) return false;
-    if (path.find("searchhost") != std::string::npos) return false;
-    if (path.find("runtimebroker") != std::string::npos) return false;
-    if (path.find("applicationframehost") != std::string::npos) return false;
-    if (path.find("antimalware") != std::string::npos) return false;
-    if (path.find("defender") != std::string::npos) return false;
-    if (path.find("securityhealth") != std::string::npos) return false;
-    if (path.find("taskhostw") != std::string::npos) return false;
-    if (path.find("conhost") != std::string::npos) return false;
-    if (path.find("backgroundtaskhost") != std::string::npos) return false;
-    if (path.find("taskmgr") != std::string::npos) return false;
-    
-    return true;
+    // Check against whitelist
+    return !process_whitelist_.IsWhitelisted(path);
 }
 
 void CredentialMonitor::AnalyzeAccessPatterns() {

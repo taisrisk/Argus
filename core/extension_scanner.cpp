@@ -8,7 +8,7 @@
 namespace argus {
 
 ExtensionScanner::ExtensionScanner() 
-    : is_active_(false), user_consent_(false) {
+    : is_active_(false), user_consent_(false), initial_scan_complete_(false), activity_monitoring_active_(false) {
 }
 
 ExtensionScanner::~ExtensionScanner() {
@@ -33,8 +33,41 @@ void ExtensionScanner::Shutdown() {
         return;
     }
     
+    StopActivityMonitoring();
+    
     is_active_ = false;
     findings_.clear();
+    activity_events_.clear();
+    monitored_extensions_.clear();
+}
+
+void ExtensionScanner::PerformInitialScan(const std::string& browser_profile_path) {
+if (!is_active_ || !user_consent_) {
+    return;
+}
+    
+std::cout << "[ExtensionScanner] Scanning extensions at browser startup..." << std::endl;
+    
+    std::string extensions_path = browser_profile_path + "\\Extensions";
+    
+    WIN32_FIND_DATAA find_data;
+    HANDLE hFind = FindFirstFileA((extensions_path + "\\*").c_str(), &find_data);
+    
+    if (hFind == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    
+    do {
+        if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            std::string dir_name = find_data.cFileName;
+            if (dir_name != "." && dir_name != ".." && dir_name != "Temp") {
+                std::string ext_path = extensions_path + "\\" + dir_name;
+                ScanExtensionOnBrowserStart(ext_path, dir_name);
+            }
+        }
+    } while (FindNextFileA(hFind, &find_data));
+    
+    FindClose(hFind);
 }
 
 void ExtensionScanner::ScanExtensions(const std::string& browser_profile_path) {
@@ -217,6 +250,287 @@ RiskLevel ExtensionScanner::AssessPermissions(const std::vector<std::string>& pe
     if (score >= 4) return RiskLevel::Medium;
     if (score >= 2) return RiskLevel::Low;
     return RiskLevel::Informational;
+}
+
+void ExtensionScanner::ScanExtensionOnBrowserStart(const std::string& extension_path, const std::string& ext_id) {
+    WIN32_FIND_DATAA find_data;
+    HANDLE hFind = FindFirstFileA((extension_path + "\\*").c_str(), &find_data);
+    
+    if (hFind == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    
+    std::string manifest_path;
+    do {
+        if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            std::string dir_name = find_data.cFileName;
+            if (dir_name != "." && dir_name != "..") {
+                std::string test_manifest = extension_path + "\\" + dir_name + "\\manifest.json";
+                WIN32_FIND_DATAA manifest_find;
+                HANDLE hManifest = FindFirstFileA(test_manifest.c_str(), &manifest_find);
+                if (hManifest != INVALID_HANDLE_VALUE) {
+                    FindClose(hManifest);
+                    manifest_path = test_manifest;
+                    break;
+                }
+            }
+        }
+    } while (FindNextFileA(hFind, &find_data));
+    
+    FindClose(hFind);
+    
+    if (manifest_path.empty()) {
+        return;
+    }
+    
+    ExtensionMonitoringProfile profile = ParseManifest(manifest_path, ext_id);
+    profile.extension_path = extension_path;
+    profile.first_seen = std::chrono::system_clock::now();
+    profile.last_scan = profile.first_seen;
+    profile.initialization_complete = false;
+    profile.staged_files_detected = false;
+    
+    profile.risk_score = CalculateRiskScore(profile);
+    
+    if (profile.risk_level >= RiskLevel::Medium) {
+        profile.poll_interval_ms = 200;
+        profile.deep_monitoring_active = true;
+    } else if (profile.risk_level == RiskLevel::Low) {
+        profile.poll_interval_ms = 1000;
+        profile.deep_monitoring_active = false;
+    } else {
+        profile.poll_interval_ms = 2000;
+        profile.deep_monitoring_active = false;
+    }
+    
+    monitored_extensions_[ext_id] = profile;
+    
+    CheckStagedFiles(ext_id, extension_path);
+    AnalyzeManifest(manifest_path, ext_id);
+}
+
+ExtensionMonitoringProfile ExtensionScanner::ParseManifest(const std::string& manifest_path, const std::string& ext_id) {
+    ExtensionMonitoringProfile profile;
+    profile.extension_id = ext_id;
+    profile.risk_level = RiskLevel::Informational;
+    
+    std::ifstream file(manifest_path);
+    if (!file.is_open()) {
+        return profile;
+    }
+    
+    std::stringstream buffer;
+    buffer << file.rdbuf();
+    std::string content = buffer.str();
+    
+    size_t name_pos = content.find("\"name\"");
+    if (name_pos != std::string::npos) {
+        size_t start = content.find(":", name_pos) + 1;
+        size_t quote1 = content.find("\"", start);
+        size_t quote2 = content.find("\"", quote1 + 1);
+        if (quote1 != std::string::npos && quote2 != std::string::npos) {
+            profile.extension_name = content.substr(quote1 + 1, quote2 - quote1 - 1);
+        }
+    }
+    
+    size_t version_pos = content.find("\"version\"");
+    if (version_pos != std::string::npos) {
+        size_t start = content.find(":", version_pos) + 1;
+        size_t quote1 = content.find("\"", start);
+        size_t quote2 = content.find("\"", quote1 + 1);
+        if (quote1 != std::string::npos && quote2 != std::string::npos) {
+            profile.version = content.substr(quote1 + 1, quote2 - quote1 - 1);
+        }
+    }
+    
+    size_t perms_pos = content.find("\"permissions\"");
+    if (perms_pos != std::string::npos) {
+        size_t array_start = content.find("[", perms_pos);
+        size_t array_end = content.find("]", array_start);
+        if (array_start != std::string::npos && array_end != std::string::npos) {
+            std::string perms_str = content.substr(array_start + 1, array_end - array_start - 1);
+            size_t pos = 0;
+            while ((pos = perms_str.find("\"")) != std::string::npos) {
+                size_t end = perms_str.find("\"", pos + 1);
+                if (end != std::string::npos) {
+                    std::string perm = perms_str.substr(pos + 1, end - pos - 1);
+                    profile.permissions.push_back(perm);
+                    perms_str = perms_str.substr(end + 1);
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+    
+    profile.risk_level = AssessPermissions(profile.permissions);
+    
+    return profile;
+}
+
+int ExtensionScanner::CalculateRiskScore(const ExtensionMonitoringProfile& profile) {
+    int score = 0;
+    
+    for (const auto& perm : profile.permissions) {
+        if (perm == "webRequestBlocking") score += 30;
+        else if (perm == "debugger") score += 25;
+        else if (perm == "proxy") score += 20;
+        else if (perm == "<all_urls>") score += 15;
+        else if (perm == "webRequest") score += 10;
+        else if (perm == "cookies") score += 10;
+        else if (perm == "storage") score += 5;
+        else score += 1;
+    }
+    
+    if (!profile.background_scripts.empty()) score += 5;
+    if (profile.background_scripts.size() > 3) score += 10;
+    
+    return score;
+}
+
+void ExtensionScanner::CheckStagedFiles(const std::string& ext_id, const std::string& ext_path) {
+    WIN32_FIND_DATAA find_data;
+    HANDLE hFind = FindFirstFileA((ext_path + "\\*").c_str(), &find_data);
+    
+    if (hFind == INVALID_HANDLE_VALUE) {
+        return;
+    }
+    
+    bool suspicious_files = false;
+    do {
+        std::string filename = find_data.cFileName;
+        std::transform(filename.begin(), filename.end(), filename.begin(), ::tolower);
+        
+        if (filename.find(".exe") != std::string::npos ||
+            filename.find(".dll") != std::string::npos ||
+            filename.find(".bat") != std::string::npos ||
+            filename.find(".ps1") != std::string::npos) {
+            suspicious_files = true;
+            std::cout << "[ExtensionScanner] WARNING: Suspicious file in extension " << ext_id << ": " << filename << std::endl;
+        }
+    } while (FindNextFileA(hFind, &find_data));
+    
+    FindClose(hFind);
+    
+    if (suspicious_files) {
+        auto it = monitored_extensions_.find(ext_id);
+        if (it != monitored_extensions_.end()) {
+            it->second.staged_files_detected = true;
+            it->second.risk_score += 50;
+            it->second.deep_monitoring_active = true;
+        }
+    }
+}
+
+void ExtensionScanner::MonitorInitializationActivity(const std::string& ext_id) {
+    auto it = monitored_extensions_.find(ext_id);
+    if (it == monitored_extensions_.end()) {
+        return;
+    }
+    
+    if (it->second.initialization_complete) {
+        return;
+    }
+    
+    auto now = std::chrono::system_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - it->second.first_seen).count();
+    
+    if (elapsed > 10) {
+        it->second.initialization_complete = true;
+        return;
+    }
+    
+    CheckStagedFiles(ext_id, it->second.extension_path);
+}
+
+void ExtensionScanner::StartActivityMonitoring() {
+    if (!is_active_ || !user_consent_ || activity_monitoring_active_) {
+        return;
+    }
+    
+    for (const auto& pair : monitored_extensions_) {
+        StartWatchersForProfile(pair.second);
+    }
+    
+    activity_monitoring_active_ = true;
+    std::cout << "[ExtensionScanner] Activity monitoring started for " << monitored_extensions_.size() << " extensions" << std::endl;
+}
+
+void ExtensionScanner::StopActivityMonitoring() {
+    if (!activity_monitoring_active_) {
+        return;
+    }
+    
+    for (auto& pair : extension_watcher_threads_) {
+        if (pair.second) {
+            WaitForSingleObject(pair.second, 1000);
+            CloseHandle(pair.second);
+        }
+    }
+    
+    extension_watcher_threads_.clear();
+    watched_extension_paths_.clear();
+    activity_monitoring_active_ = false;
+}
+
+void ExtensionScanner::UpdateActivityMonitoring() {
+    if (!activity_monitoring_active_) {
+        return;
+    }
+    
+    auto now = std::chrono::system_clock::now();
+    
+    for (auto& pair : monitored_extensions_) {
+        MonitorExtensionActivity(pair.second);
+    }
+}
+
+void ExtensionScanner::MonitorExtensionActivity(const ExtensionMonitoringProfile& profile) {
+    auto now = std::chrono::system_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - profile.last_scan).count();
+    
+    if (elapsed < profile.poll_interval_ms) {
+        return;
+    }
+    
+    std::string manifest_path = profile.extension_path;
+    WIN32_FIND_DATAA find_data;
+    HANDLE hFind = FindFirstFileA((manifest_path + "\\*").c_str(), &find_data);
+    
+    if (hFind != INVALID_HANDLE_VALUE) {
+        FindClose(hFind);
+    }
+}
+
+void ExtensionScanner::StartWatchersForProfile(const ExtensionMonitoringProfile& profile) {
+    if (watched_extension_paths_.find(profile.extension_path) != watched_extension_paths_.end()) {
+        return;
+    }
+    
+    watched_extension_paths_.insert(profile.extension_path);
+}
+
+void ExtensionScanner::StopWatchersForProfile(const std::string& extension_id) {
+    auto it = extension_watcher_threads_.find(extension_id);
+    if (it != extension_watcher_threads_.end()) {
+        if (it->second) {
+            WaitForSingleObject(it->second, 1000);
+            CloseHandle(it->second);
+        }
+        extension_watcher_threads_.erase(it);
+    }
+}
+
+DWORD WINAPI ExtensionScanner::ExtensionWatcherThread(LPVOID param) {
+    return 0;
+}
+
+std::vector<ExtensionActivityEvent> ExtensionScanner::GetRecentActivity(int max_count) {
+    if (activity_events_.size() <= static_cast<size_t>(max_count)) {
+        return activity_events_;
+    }
+    
+    return std::vector<ExtensionActivityEvent>(activity_events_.end() - max_count, activity_events_.end());
 }
 
 }

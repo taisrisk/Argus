@@ -2,6 +2,7 @@
 #include <iomanip>
 #include <sstream>
 #include <ctime>
+#include <windows.h>
 
 namespace argus {
 
@@ -19,6 +20,8 @@ bool Logger::Initialize(const std::string& session_id) {
     if (is_active_) {
         return false;
     }
+    
+    CreateDirectoryA("logs", NULL);
     
     log_file_path_ = "logs\\" + session_id + ".log";
     log_file_.open(log_file_path_, std::ios::out | std::ios::trunc);

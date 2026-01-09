@@ -1,0 +1,199 @@
+{
+  "version": "1.0.0",
+  "description": "Process whitelist for Argus credential monitor - trusted applications that should not be flagged as suspicious",
+  "categories": {
+    "browsers": {
+      "description": "Main browser executables",
+      "processes": [
+        "chrome.exe",
+        "msedge.exe",
+        "firefox.exe",
+        "brave.exe",
+        "opera.exe",
+        "opera gx.exe",
+        "vivaldi.exe",
+        "comet.exe"
+      ]
+    },
+    "browser_services": {
+      "description": "Critical browser services (elevation, updates, helpers)",
+      "processes": [
+        "elevation_service.exe",
+        "googleupdate.exe",
+        "googleupdatecore.exe",
+        "msedgeupdate.exe",
+        "chrome_pwa_launcher.exe",
+        "chrome_proxy.exe",
+        "notification_helper.exe"
+      ]
+    },
+    "development_tools": {
+      "description": "Development and IDE tools",
+      "processes": [
+        "devenv.exe",
+        "code.exe",
+        "codehelper.exe",
+        "msbuild.exe",
+        "vcpkgsrv.exe",
+        "servicehub",
+        "vctip.exe",
+        "perfwatson",
+        "vshost.exe",
+        "dotnet.exe",
+        "powershell.exe",
+        "pwsh.exe",
+        "git.exe",
+        "githubdesktop.exe",
+        "sqlwriter.exe",
+        "diagnosticshub",
+        "standardcollector",
+        "codex.exe",
+        ".vscode"
+      ]
+    },
+    "graphics_gpu": {
+      "description": "Graphics card and GPU utilities",
+      "processes": [
+        "nvcontainer.exe",
+        "nvsphelper",
+        "nvidia",
+        "radeonsoftware",
+        "amdryzenmaster",
+        "intelgraphics"
+      ]
+    },
+    "hardware_peripherals": {
+      "description": "Hardware control and RGB software",
+      "processes": [
+        "openrgb.exe",
+        "fancontrol.exe",
+        "steelseries",
+        "redragon",
+        "mouse drive",
+        "corsair",
+        "razer",
+        "logitech"
+      ]
+    },
+    "communication": {
+      "description": "Communication and messaging apps",
+      "processes": [
+        "discord.exe",
+        "discordsystemhelper",
+        "discord_updater",
+        "slack.exe",
+        "teams.exe",
+        "skype.exe",
+        "zoom.exe",
+        "signal.exe",
+        "telegram.exe"
+      ]
+    },
+    "gaming": {
+      "description": "Gaming platforms and launchers",
+      "processes": [
+        "steam.exe",
+        "steamservice",
+        "steamwebhelper",
+        "epicgameslauncher",
+        "ubisoftconnect",
+        "origin.exe",
+        "riotclient",
+        "battle.net",
+        "goggalaxy",
+        "wallpaper64.exe"
+      ]
+    },
+    "music_media": {
+      "description": "Music and media players",
+      "processes": [
+        "spotify.exe",
+        "spotifywebhelper",
+        "itunes.exe",
+        "vlc.exe",
+        "foobar2000",
+        "potplayer",
+        "mediamonkey"
+      ]
+    },
+    "utilities": {
+      "description": "Common utility software",
+      "processes": [
+        "7z.exe",
+        "winrar.exe",
+        "notepad.exe",
+        "notepad++",
+        "sumatrapdf",
+        "paint.net",
+        "gimp",
+        "photoshop",
+        "lightroom",
+        "blender",
+        "everything.exe"
+      ]
+    },
+    "vpn_services": {
+      "description": "VPN software and services",
+      "processes": [
+        "nordvpn",
+        "nordupdater",
+        "nordupdate",
+        "openvpn",
+        "protonvpn",
+        "expressvpn",
+        "surfshark"
+      ]
+    },
+    "virtualization": {
+      "description": "Virtual machine software",
+      "processes": [
+        "vmware",
+        "virtualbox",
+        "hyper-v"
+      ]
+    },
+    "antivirus": {
+      "description": "Antivirus and security software",
+      "processes": [
+        "msmpeng",
+        "avast",
+        "avira",
+        "kaspersky",
+        "bitdefender"
+      ]
+    },
+    "system_processes": {
+      "description": "Windows system processes",
+      "processes": [
+        "system32",
+        "\\windows\\",
+        "\\microsoft\\",
+        "windowsapps",
+        "svchost",
+        "csrss",
+        "lsass",
+        "services",
+        "smss",
+        "wininit",
+        "dwm",
+        "explorer.exe",
+        "searchhost",
+        "runtimebroker",
+        "applicationframehost",
+        "antimalware",
+        "defender",
+        "securityhealth",
+        "taskhostw",
+        "conhost",
+        "backgroundtaskhost",
+        "taskmgr"
+      ]
+    },
+    "argus": {
+      "description": "Argus itself",
+      "processes": [
+        "argus.exe"
+      ]
+    }
+  }
+}

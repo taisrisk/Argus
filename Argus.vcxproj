@@ -134,6 +134,7 @@
     <ClCompile Include="core\credential_monitor.cpp" />
     <ClCompile Include="core\file_identity.cpp" />
     <ClCompile Include="core\file_neutralizer.cpp" />
+    <ClCompile Include="core\process_whitelist.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="core\session_manager.cpp" />
     <ClCompile Include="core\process_monitor.cpp" />
@@ -149,7 +150,9 @@
     <ClInclude Include="core\credential_monitor.h" />
     <ClInclude Include="core\file_identity.h" />
     <ClInclude Include="core\file_neutralizer.h" />
+    <ClInclude Include="core\monitoring_threads.h" />
     <ClInclude Include="core\prevention_logger.h" />
+    <ClInclude Include="core\process_whitelist.h" />
     <ClInclude Include="core\session_manager.h" />
     <ClInclude Include="core\process_monitor.h" />
     <ClInclude Include="core\network_monitor.h" />
@@ -157,12 +160,13 @@
     <ClInclude Include="core\file_monitor.h" />
     <ClInclude Include="core\risk_engine.h" />
     <ClInclude Include="core\logger.h" />
+    <ClInclude Include="core\threat_detector.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include=".gitignore" />
     <None Include="config\argus.json" />
+    <None Include="config\process_whitelist.json" />
     <None Include="README.md" />
-    <None Include="README_new.md" />
     <None Include="run_argus.bat" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />

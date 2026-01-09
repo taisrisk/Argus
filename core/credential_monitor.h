@@ -3,6 +3,7 @@
 #include "file_identity.h"
 #include "file_neutralizer.h"
 #include "prevention_logger.h"
+#include "process_whitelist.h"
 #include <string>
 #include <vector>
 #include <chrono>
@@ -46,6 +47,36 @@ struct AccessEvent {
     bool is_decoy_hit;
 };
 
+struct ProcessFingerprint {
+    std::string sha256_hash;
+    std::string compile_time;
+    bool has_signature;
+    std::string signature_info;
+    std::vector<std::string> staged_files;
+    int forensic_score;
+    
+    // Enhanced forensic data
+    std::string pe_timestamp;
+    std::string pe_subsystem;
+    uint32_t pe_characteristics;
+    std::vector<std::string> import_dlls;
+    size_t memory_working_set;
+    std::string parent_process_path;
+    uint32_t parent_pid;
+    bool is_packed;
+    std::string process_user;
+    std::vector<std::string> open_handles;
+    std::chrono::system_clock::time_point creation_time;
+    int64_t process_age_ms;
+};
+
+enum class ThreatAction {
+    Monitor,
+    Suspend,
+    Terminate,
+    Whitelist
+};
+
 struct ThreatChain {
     uint32_t pid;
     std::string process_path;
@@ -54,6 +85,9 @@ struct ThreatChain {
     std::chrono::system_clock::time_point first_event;
     std::chrono::system_clock::time_point last_event;
     bool reported;
+    bool is_suspended;
+    ThreatAction action;
+    ProcessFingerprint fingerprint;
 };
 
 struct FileSnapshot {
@@ -88,12 +122,21 @@ public:
     std::vector<ThreatChain> GetActiveThreats();
     
     void TerminateThread(uint32_t pid);
+    bool SuspendProcess(uint32_t pid);
+    bool ResumeProcess(uint32_t pid);
+    ProcessFingerprint ExtractFingerprint(uint32_t pid);
+    ThreatAction DecideThreatAction(const ThreatChain& chain);
     bool KillProcess(uint32_t pid);
     
     void OnFileAccess(uint32_t pid, const std::wstring& filepath);
     
+    bool IsTrustedBrowserService(const std::string& process_path);
+    bool IsCriticalBrowserComponent(const std::string& process_path);
+    std::string ClassifyProcessType(uint32_t pid, const std::string& process_path);
+    
     void StartDirectoryWatchers();
     void StopDirectoryWatchers();
+    bool AreWatchersRunning() const { return !watcher_threads_.empty(); }
     static DWORD WINAPI WatcherThread(LPVOID param);
     static DWORD WINAPI PollingThread(LPVOID param);
     static DWORD WINAPI TempFileWatcherThread(LPVOID param);
@@ -128,6 +171,7 @@ private:
     HANDLE temp_watcher_thread_;
     
     FileIdentityTracker file_identity_tracker_;
+    ProcessWhitelist process_whitelist_;
     
     TRACEHANDLE session_handle_;
     TRACEHANDLE trace_handle_;
@@ -136,6 +180,9 @@ private:
     std::mutex chains_mutex_;
     
     static CredentialMonitor* s_instance;
+    
+    friend class ThreatDetector;
+    friend class MonitoringThreads;
 };
 
 }

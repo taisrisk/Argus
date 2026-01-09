@@ -8,6 +8,7 @@
 #include "core/credential_monitor.h"
 #include <windows.h>
 #include <iostream>
+#include <limits>
 #include <thread>
 #include <atomic>
 #include <vector>
@@ -30,19 +31,19 @@ if (!SetConsoleCtrlHandler(ConsoleHandler, TRUE)) {
     return 1;
 }
     
-std::cout << "Argus Phase 2.6 - Browser Security Monitor" << std::endl;
-std::cout << "Read-only | Local-only | Active defense" << std::endl;
+std::cout << "Argus Phase 2.9 - Browser Security Monitor" << std::endl;
+std::cout << "Zero-tolerance enforcement | <5ms detection" << std::endl;
 std::cout << std::endl;
     
 bool extension_scan_consent = false;
 std::cout << "Allow Argus to scan extension files (local, read-only)? (y/n): ";
 std::cout.flush();
     
-char consent;
-std::cin >> consent;
-std::cin.ignore(10000, '\n');
+    char consent;
+    std::cin >> consent;
+    std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
     
-extension_scan_consent = (consent == 'y' || consent == 'Y');
+    extension_scan_consent = (consent == 'y' || consent == 'Y');
     
 std::cout << "You selected: " << (extension_scan_consent ? "YES" : "NO") << std::endl;
 std::cout.flush();
@@ -170,10 +171,11 @@ std::cout.flush();
     int cycle = 0;
     size_t last_assessment_count = 0;
     
-    std::cout << "Phase 2.6: Active defense + automatic threat termination" << std::endl;
+    std::cout << "Phase 2.9: Active defense + process suspension + forensic analysis" << std::endl;
     std::cout.flush();
     
     auto last_extension_scan = std::chrono::steady_clock::now() - std::chrono::seconds(extension_scan_interval_seconds + 1);
+    bool initial_extension_scan_done = false;
     
     while (g_running) {
         process_monitor.Update();
@@ -196,10 +198,8 @@ std::cout.flush();
             }
         }
         
-        auto now = std::chrono::steady_clock::now();
-        auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last_extension_scan).count();
-        
-        if (extension_scan_consent && elapsed >= extension_scan_interval_seconds) {
+        if (extension_scan_consent && !initial_extension_scan_done) {
+            std::cout << "\n=== Initial Extension Scan (One-Time) ===" << std::endl;
             std::cout << "\n=== Extension Scan ===" << std::endl;
             
             char* localappdata = nullptr;
@@ -254,7 +254,7 @@ std::cout.flush();
                             if (dir_name == "Default" || dir_name.find("Profile") == 0) {
                                 std::string profile_path = browser.path + "\\" + dir_name;
                                 
-                                extension_scanner.ScanExtensions(profile_path);
+                                extension_scanner.PerformInitialScan(profile_path);
                                 auto status = credential_monitor.RegisterBrowserProfileWithStatus(browser.id, profile_path);
                                 
                                 std::string status_str;
@@ -316,7 +316,12 @@ std::cout.flush();
                 std::cout << "\n=== Credential Protection Active ===" << std::endl;
                 std::cout << "Watching for unauthorized access to browser credentials..." << std::endl;
                 
-                credential_monitor.StartDirectoryWatchers();
+                if (!credential_monitor.AreWatchersRunning()) {
+                    credential_monitor.StartDirectoryWatchers();
+                }
+                
+                extension_scanner.StartActivityMonitoring();
+                std::cout << "[ExtensionScanner] Real-time activity monitoring enabled" << std::endl;
                 
                 if (localappdata) free(localappdata);
                 if (appdata) free(appdata);
@@ -325,7 +330,13 @@ std::cout.flush();
                 logger.Log(argus::LogLevel::Error, "Failed to get environment variables");
             }
             
-            last_extension_scan = now;
+            initial_extension_scan_done = true;
+            std::cout << "\n[SYSTEM] Extension scan complete. Entering continuous monitoring mode." << std::endl;
+            std::cout.flush();
+        }
+        
+        if (extension_scan_consent && initial_extension_scan_done) {
+            extension_scanner.UpdateActivityMonitoring();
         }
         
         auto assessments = risk_engine.GetAssessments();
@@ -371,6 +382,10 @@ std::cout.flush();
     
     std::cout << "Argus session ended. No persistence. No residue." << std::endl;
     std::cout << "Log file: logs\\" << session.GetSessionId() << ".log" << std::endl;
+    std::cout << "\nPress Enter to exit...";
+    std::cout.flush();
+    std::cin.ignore((std::numeric_limits<std::streamsize>::max)(), '\n');
+    std::cin.get();
     
     return 0;
 }

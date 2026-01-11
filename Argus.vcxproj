@@ -134,7 +134,9 @@
     <ClCompile Include="core\credential_monitor.cpp" />
     <ClCompile Include="core\file_identity.cpp" />
     <ClCompile Include="core\file_neutralizer.cpp" />
+    <ClCompile Include="core\handle_monitor.cpp" />
     <ClCompile Include="core\process_whitelist.cpp" />
+    <ClCompile Include="core\signal_correlator.cpp" />
     <ClCompile Include="main.cpp" />
     <ClCompile Include="core\session_manager.cpp" />
     <ClCompile Include="core\process_monitor.cpp" />
@@ -150,6 +152,7 @@
     <ClInclude Include="core\credential_monitor.h" />
     <ClInclude Include="core\file_identity.h" />
     <ClInclude Include="core\file_neutralizer.h" />
+    <ClInclude Include="core\handle_monitor.h" />
     <ClInclude Include="core\monitoring_threads.h" />
     <ClInclude Include="core\prevention_logger.h" />
     <ClInclude Include="core\process_whitelist.h" />
@@ -160,12 +163,15 @@
     <ClInclude Include="core\file_monitor.h" />
     <ClInclude Include="core\risk_engine.h" />
     <ClInclude Include="core\logger.h" />
+    <ClInclude Include="core\signal_correlator.h" />
     <ClInclude Include="core\threat_detector.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include=".gitignore" />
     <None Include="config\argus.json" />
     <None Include="config\process_whitelist.json" />
+    <None Include="docs\BROWSER_SELF_ACCESS.md" />
+    <None Include="docs\PHASE_3.1_MULTI_SIGNAL_EDR.md" />
     <None Include="README.md" />
     <None Include="run_argus.bat" />
   </ItemGroup>

@@ -3,7 +3,7 @@
   "description": "Process whitelist for Argus credential monitor - trusted applications that should not be flagged as suspicious",
   "categories": {
     "browsers": {
-      "description": "Main browser executables",
+      "description": "Main browser executables - browsers can access their own credential files",
       "processes": [
         "chrome.exe",
         "msedge.exe",
@@ -12,7 +12,15 @@
         "opera.exe",
         "opera gx.exe",
         "vivaldi.exe",
-        "comet.exe"
+        "comet.exe",
+        "\\google\\chrome\\application\\chrome.exe",
+        "\\microsoft\\edge\\application\\msedge.exe",
+        "\\mozilla firefox\\firefox.exe",
+        "\\bravesoftware\\brave-browser\\application\\brave.exe",
+        "\\opera software\\opera stable\\opera.exe",
+        "\\opera software\\opera gx stable\\opera.exe",
+        "\\vivaldi\\application\\vivaldi.exe",
+        "\\perplexity\\comet\\application\\comet.exe"
       ]
     },
     "browser_services": {

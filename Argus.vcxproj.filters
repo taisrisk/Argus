@@ -69,6 +69,12 @@
     <ClCompile Include="core\process_whitelist.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="core\handle_monitor.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="core\signal_correlator.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="core\session_manager.h">
@@ -113,6 +119,12 @@
     <ClInclude Include="core\monitoring_threads.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="core\handle_monitor.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="core\signal_correlator.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="config\argus.json">
@@ -124,5 +136,7 @@
     </None>
     <None Include=".gitignore" />
     <None Include="config\process_whitelist.json" />
+    <None Include="docs\PHASE_3.1_MULTI_SIGNAL_EDR.md" />
+    <None Include="docs\BROWSER_SELF_ACCESS.md" />
   </ItemGroup>
 </Project>

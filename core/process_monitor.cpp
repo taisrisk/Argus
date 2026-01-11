@@ -61,9 +61,15 @@ std::vector<ProcessEvent> ProcessMonitor::GetRecentEvents(int max_count) {
 }
 
 void ProcessMonitor::ScanForBrowserProcesses() {
-    std::vector<std::string> browser_names = {
-        "chrome.exe", "firefox.exe", "msedge.exe", "brave.exe", "opera.exe"
-    };
+std::vector<std::string> browser_names = {
+    "chrome.exe", 
+    "firefox.exe", 
+    "msedge.exe", 
+    "brave.exe", 
+    "opera.exe",
+    "vivaldi.exe",
+    "comet.exe"
+};
     
     HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (snapshot == INVALID_HANDLE_VALUE) {

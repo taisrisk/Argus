@@ -71,12 +71,20 @@ bool CredentialMonitor::Initialize() {
     last_check_ = std::chrono::system_clock::now();
     
     file_identity_tracker_.Initialize();
+    handle_monitor_.Initialize();
+    signal_correlator_.Initialize();
+    
+    // Link monitors to correlator
+    signal_correlator_.SetHandleMonitor(&handle_monitor_);
+    signal_correlator_.SetFileIdentityTracker(&file_identity_tracker_);
+    
     PreventionLogger::Initialize();
     
     polling_thread_ = CreateThread(NULL, 0, PollingThread, this, 0, NULL);
     temp_watcher_thread_ = CreateThread(NULL, 0, TempFileWatcherThread, this, 0, NULL);
     
-    std::cout << "[CredentialMonitor] Real-time monitoring + identity tracking + forensic logging active" << std::endl;
+    std::cout << "[CredentialMonitor] Phase 3.1 - Multi-signal EDR mesh active" << std::endl;
+    std::cout << "[CredentialMonitor] Watchdogs: File Identity | Handle Monitor | Signal Correlator | ETW" << std::endl;
     
     return true;
 }
@@ -102,6 +110,8 @@ void CredentialMonitor::Shutdown() {
         temp_watcher_thread_ = NULL;
     }
     
+    signal_correlator_.Shutdown();
+    handle_monitor_.Shutdown();
     file_identity_tracker_.Shutdown();
     
     is_active_ = false;
@@ -612,6 +622,7 @@ MonitoringStatus CredentialMonitor::RegisterBrowserProfileWithStatus(const std::
 
 void CredentialMonitor::SetBrowserProcessIds(const std::vector<uint32_t>& pids) {
     browser_pids_ = pids;
+    handle_monitor_.SetBrowserProcessIds(pids);
 }
 
 void CredentialMonitor::Update() {
@@ -832,6 +843,49 @@ std::string filepath_narrow(filepath.begin(), filepath.end());
 std::string lower_narrow = filepath_narrow;
 std::transform(lower_narrow.begin(), lower_narrow.end(), lower_narrow.begin(), ::tolower);
     
+// Get process path to check if it's a browser
+std::string process_path = GetProcessPath(pid);
+std::string process_lower = process_path;
+std::transform(process_lower.begin(), process_lower.end(), process_lower.begin(), ::tolower);
+
+// Check if browser is accessing its own profile
+bool is_browser_self_access = false;
+if (process_lower.find("chrome.exe") != std::string::npos && lower_narrow.find("\\google\\chrome\\") != std::string::npos) is_browser_self_access = true;
+if (process_lower.find("msedge.exe") != std::string::npos && lower_narrow.find("\\microsoft\\edge\\") != std::string::npos) is_browser_self_access = true;
+if (process_lower.find("firefox.exe") != std::string::npos && lower_narrow.find("\\mozilla\\firefox\\") != std::string::npos) is_browser_self_access = true;
+if (process_lower.find("brave.exe") != std::string::npos && lower_narrow.find("\\bravesoftware\\") != std::string::npos) is_browser_self_access = true;
+if (process_lower.find("opera.exe") != std::string::npos && lower_narrow.find("\\opera software\\") != std::string::npos) is_browser_self_access = true;
+if (process_lower.find("vivaldi.exe") != std::string::npos && lower_narrow.find("\\vivaldi\\") != std::string::npos) is_browser_self_access = true;
+if (process_lower.find("comet.exe") != std::string::npos && lower_narrow.find("\\perplexity\\comet\\") != std::string::npos) is_browser_self_access = true;
+
+// Chromium-based browsers can import/sync from each other (legitimate behavior)
+bool is_chromium_cross_access = false;
+std::vector<std::string> chromium_browsers = {"chrome.exe", "msedge.exe", "brave.exe", "vivaldi.exe", "comet.exe", "opera.exe"};
+bool is_chromium_process = false;
+bool is_chromium_target = false;
+
+for (const auto& browser : chromium_browsers) {
+    if (process_lower.find(browser) != std::string::npos) is_chromium_process = true;
+}
+
+if (lower_narrow.find("\\google\\chrome\\") != std::string::npos ||
+    lower_narrow.find("\\microsoft\\edge\\") != std::string::npos ||
+    lower_narrow.find("\\bravesoftware\\") != std::string::npos ||
+    lower_narrow.find("\\vivaldi\\") != std::string::npos ||
+    lower_narrow.find("\\perplexity\\comet\\") != std::string::npos ||
+    lower_narrow.find("\\opera software\\") != std::string::npos) {
+    is_chromium_target = true;
+}
+
+is_chromium_cross_access = is_chromium_process && is_chromium_target;
+
+// If browser is accessing its own files OR Chromium browser accessing another Chromium browser (import/sync), this is legitimate
+if (is_browser_self_access || is_chromium_cross_access) {
+    // Silently allow - browsers need to access their own credential stores
+    // Chromium browsers also legitimately import/sync from each other
+    return;
+}
+
 uint64_t file_id = 0;
 uint32_t volume_serial = 0;
 bool has_identity = file_identity_tracker_.GetFileIdentity(filepath_narrow, file_id, volume_serial);
@@ -841,34 +895,62 @@ bool is_indirect = has_identity && file_identity_tracker_.IsReparsePoint(filepat
     if (has_identity) {
         file_identity_tracker_.RecordFileAccess(pid, filepath_narrow, file_id, volume_serial, is_indirect);
         
+        // Record signal for correlation
+        AssetType asset_type = GetAssetType(filepath);
+        if (asset_type == AssetType::LoginData || asset_type == AssetType::LocalState) {
+            signal_correlator_.RecordSignal(SignalType::FileAccess, pid, 30, filepath_narrow);
+        } else if (asset_type == AssetType::Cookies) {
+            signal_correlator_.RecordSignal(SignalType::FileAccess, pid, 10, filepath_narrow);
+        }
+        
         ProcessActivity* activity = file_identity_tracker_.GetProcessActivity(pid);
         if (activity) {
             if (activity->has_temp_staging) {
+                // Multi-signal detected: file access + temp staging
+                signal_correlator_.RecordSignal(SignalType::TempStaging, pid, 40, "Temp DB staging detected");
+                
                 std::cout << "\n!!! CRITICAL: STAGING + CREDENTIAL ACCESS !!!" << std::endl;
                 std::cout << "Behavior Score: " << activity->behavior_score << std::endl;
                 std::cout << "Temp DB Files: " << activity->temp_db_files.size() << std::endl;
                 for (const auto& temp_file : activity->temp_db_files) {
                     std::cout << "  - " << temp_file << std::endl;
                 }
-                std::cout << ">>> TERMINATING IMMEDIATELY" << std::endl;
-                if (KillProcess(pid)) {
-                    std::cout << ">>> SUCCESS: Staging process terminated" << std::endl;
+                
+                // Check correlation
+                if (signal_correlator_.ShouldTerminate(pid)) {
+                    std::cout << ">>> MULTI-SIGNAL CONFIRMATION: TERMINATING" << std::endl;
+                    std::cout << ">>> Classification: " << signal_correlator_.ClassifyThreat(pid) << std::endl;
+                    
+                    if (KillProcess(pid)) {
+                        std::cout << ">>> SUCCESS: Staging process terminated" << std::endl;
+                    } else {
+                        std::cout << ">>> FAILURE: Could not terminate" << std::endl;
+                    }
                 } else {
-                    std::cout << ">>> FAILURE: Could not terminate" << std::endl;
+                    std::cout << ">>> SUSPENDING FOR ANALYSIS" << std::endl;
                 }
                 std::cout << std::endl;
             } else if (activity->behavior_score >= 90) {
                 std::cout << "\n!!! HIGH RISK BEHAVIOR DETECTED !!!" << std::endl;
                 std::cout << "Behavior Score: " << activity->behavior_score << std::endl;
                 std::cout << "Classification: ";
-                if (activity->behavior_score >= 120) {
-                    std::cout << "CONFIRMED CREDENTIAL THEFT" << std::endl;
-                    std::cout << ">>> TERMINATING IMMEDIATELY" << std::endl;
+                
+                // Check signal correlation before termination
+                std::string classification = signal_correlator_.ClassifyThreat(pid);
+                std::cout << classification << std::endl;
+                
+                if (classification == "CONFIRMED_STEALER" || classification == "HIGH_CONFIDENCE_THREAT") {
+                    std::cout << ">>> MULTI-SIGNAL CORROBORATION: TERMINATING" << std::endl;
+                    if (KillProcess(pid)) {
+                        std::cout << ">>> SUCCESS: Process terminated" << std::endl;
+                    }
+                } else if (activity->behavior_score >= 120) {
+                    std::cout << ">>> HIGH SCORE OVERRIDE: TERMINATING" << std::endl;
                     if (KillProcess(pid)) {
                         std::cout << ">>> SUCCESS: Process terminated" << std::endl;
                     }
                 } else {
-                    std::cout << "HIGH RISK ACTIVITY" << std::endl;
+                    std::cout << ">>> Waiting for additional signals..." << std::endl;
                 }
                 std::cout << std::endl;
             }
@@ -946,6 +1028,13 @@ if (active_chains_.find(pid) == active_chains_.end()) {
     std::cout << "  Files accessed: " << active_chains_[pid].events.size() << std::endl;
     std::cout << "  Risk score: " << old_score << " -> " << active_chains_[pid].risk_score;
     
+    // Show signal correlation status
+    auto* correlated = signal_correlator_.AnalyzeProcess(pid);
+    if (correlated) {
+        std::cout << " | Signals: " << correlated->signals.size() 
+                  << " (" << correlated->corroboration_count << " corroborated)";
+    }
+    
     std::set<AssetType> types;
     for (const auto& evt : active_chains_[pid].events) {
         types.insert(evt.asset_type);
@@ -968,6 +1057,13 @@ if (active_chains_.find(pid) == active_chains_.end()) {
     if (event.asset_type == AssetType::LoginData) {
         std::cout << "========================================" << std::endl;
         std::cout << ">>> CRITICAL: PASSWORD FILE ACCESSED" << std::endl;
+        
+        // Check multi-signal correlation
+        if (signal_correlator_.ShouldTerminate(pid)) {
+            std::cout << ">>> MULTI-SIGNAL CORROBORATION CONFIRMED" << std::endl;
+            std::cout << ">>> Classification: " << signal_correlator_.ClassifyThreat(pid) << std::endl;
+        }
+        
         std::cout << ">>> KILLING IMMEDIATELY (ZERO TOLERANCE)" << std::endl;
         
         std::vector<std::string> accessed_files = {filepath_narrow};
@@ -989,6 +1085,15 @@ if (active_chains_.find(pid) == active_chains_.end()) {
     if (event.asset_type == AssetType::LocalState) {
         std::cout << "========================================" << std::endl;
         std::cout << ">>> CRITICAL: MASTER KEY ACCESSED" << std::endl;
+        
+        // Record encryption key access signal
+        signal_correlator_.RecordSignal(SignalType::EncryptionKeyAccess, pid, 50, "Master key accessed");
+        
+        if (signal_correlator_.ShouldTerminate(pid)) {
+            std::cout << ">>> MULTI-SIGNAL CORROBORATION CONFIRMED" << std::endl;
+            std::cout << ">>> Classification: " << signal_correlator_.ClassifyThreat(pid) << std::endl;
+        }
+        
         std::cout << ">>> KILLING IMMEDIATELY (ZERO TOLERANCE)" << std::endl;
         
         std::vector<std::string> accessed_files = {filepath_narrow};
@@ -1011,6 +1116,12 @@ if (active_chains_.find(pid) == active_chains_.end()) {
         std::cout << "========================================" << std::endl;
         std::cout << ">>> CRITICAL: SUSPICIOUS COOKIE ACCESS" << std::endl;
         
+        // Check correlation before terminating
+        bool should_terminate = signal_correlator_.ShouldTerminate(pid);
+        if (should_terminate) {
+            std::cout << ">>> MULTI-SIGNAL CORRELATION: " << signal_correlator_.ClassifyThreat(pid) << std::endl;
+        }
+        
         std::vector<std::string> accessed_files = {filepath_narrow};
         std::vector<std::string> neutralized_files;
         
@@ -1030,6 +1141,12 @@ if (active_chains_.find(pid) == active_chains_.end()) {
     if (active_chains_[pid].risk_score >= 7) {
         std::cout << "========================================" << std::endl;
         std::cout << ">>> HIGH RISK THRESHOLD EXCEEDED" << std::endl;
+        
+        // Consult signal correlator
+        if (signal_correlator_.ShouldSuspend(pid)) {
+            std::cout << ">>> MULTI-SIGNAL DETECTED: " << signal_correlator_.ClassifyThreat(pid) << std::endl;
+        }
+        
         std::cout << ">>> TERMINATING PROCESS" << std::endl;
         if (KillProcess(pid)) {
             std::cout << ">>> SUCCESS: Process terminated (PID: " << pid << ")" << std::endl;

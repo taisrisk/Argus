@@ -4,6 +4,8 @@
 #include "file_neutralizer.h"
 #include "prevention_logger.h"
 #include "process_whitelist.h"
+#include "handle_monitor.h"
+#include "signal_correlator.h"
 #include <string>
 #include <vector>
 #include <chrono>
@@ -172,6 +174,8 @@ private:
     
     FileIdentityTracker file_identity_tracker_;
     ProcessWhitelist process_whitelist_;
+    HandleMonitor handle_monitor_;
+    SignalCorrelator signal_correlator_;
     
     TRACEHANDLE session_handle_;
     TRACEHANDLE trace_handle_;

@@ -31,8 +31,8 @@ if (!SetConsoleCtrlHandler(ConsoleHandler, TRUE)) {
     return 1;
 }
     
-std::cout << "Argus Phase 2.9 - Browser Security Monitor" << std::endl;
-std::cout << "Zero-tolerance enforcement | <5ms detection" << std::endl;
+std::cout << "Argus Phase 3.1 - Multi-Signal EDR Mesh" << std::endl;
+std::cout << "Zero-tolerance enforcement | <5ms detection | Signal correlation" << std::endl;
 std::cout << std::endl;
     
 bool extension_scan_consent = false;
@@ -171,7 +171,7 @@ std::cout.flush();
     int cycle = 0;
     size_t last_assessment_count = 0;
     
-    std::cout << "Phase 2.9: Active defense + process suspension + forensic analysis" << std::endl;
+    std::cout << "Phase 3.1: Multi-signal EDR mesh + handle monitoring + signal correlation" << std::endl;
     std::cout.flush();
     
     auto last_extension_scan = std::chrono::steady_clock::now() - std::chrono::seconds(extension_scan_interval_seconds + 1);

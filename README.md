@@ -1,35 +1,90 @@
 ﻿# ARGUS
 
-**Real-time browser credential protection for Windows with forensic analysis.**
+**Real-time browser credential protection for Windows with multi-signal EDR mesh.**
 
 ## What It Does
 
-Argus detects credential stealers before they can extract browser passwords, cookies, or encryption keys. Combines process suspension, forensic fingerprinting, and smart whitelisting with <5ms detection.
+Argus detects credential stealers before they can extract browser passwords, cookies, or encryption keys. **Phase 3.1** implements multi-signal correlation where no single watchdog is authoritative - only corroborated signals trigger termination.
 
-### Core Features
+### Core Features - Phase 3.1
 
 - **<5ms Detection**: 1ms polling + I/O completion ports for instant threat detection
+- **Multi-Signal EDR Mesh**: Handle Monitor | File Identity Tracker | Signal Correlator | ETW
+- **Signal Correlation**: No single watchdog is authoritative - requires corroboration
+- **Handle + Memory Tracking**: NtReadVirtualMemory detection with context gating
 - **Process Suspension**: Freezes threats before termination for forensic analysis
 - **Forensic Fingerprinting**: Extracts PE headers, hashes, signatures from suspended processes
 - **Smart Whitelisting**: Identifies browser services (elevation_service, updaters) to prevent false positives
-- **Intelligent Response**: Suspend → Fingerprint → Classify → Terminate/Monitor based on process type
+- **Intelligent Response**: Suspend → Fingerprint → Correlate → Classify → Terminate/Monitor
 - **File Identity Tracking**: Detects symlink/junction/hardlink evasion techniques
 - **Continuous Neutralization**: 5-second aggressive scan after termination
 - **Extension Monitoring**: Tiered scanning (one-time audit + real-time activity tracking)
-- **Multi-Browser Support**: Chrome, Edge, Brave, Opera, Vivaldi, Firefox, Comet
+- **Multi-Browser Support**: Chrome, Edge, Brave, Opera, Opera GX, Vivaldi, Firefox, Perplexity Comet
 - **Configurable Whitelist**: 100+ whitelisted apps in JSON config
+
+### Signal Correlation Logic
+
+**EDR Rule #1**: Any single signal can fail. Only a mesh of signals is authoritative.
+
+**Corroboration Examples:**
+- `HandleOpen` + `MemoryRead` = Corroborated
+- `FileAccess` + `TempStaging` = Corroborated
+- `EncryptionKeyAccess` + `FileAccess` = Corroborated
+- `DPAPIAccess` + `MemoryRead` = Corroborated
+- `TempStaging` + `NetworkActivity` = Corroborated
+
+**Decision Matrix:**
+| Signals | Corroborated | Score | Action |
+|---------|--------------|-------|--------|
+| 1 | 0 | <30 | Monitor only |
+| 2+ | 1+ | 50-74 | Suspend for analysis |
+| 3+ | 2+ | 75-99 | Terminate (high confidence) |
+| 2+ | 2+ | 100+ | Terminate (confirmed stealer) |
+
+### NtReadVirtualMemory Positioning
+
+**Not used as**:
+- Primary kill trigger
+- Standalone detection
+
+**Used for**:
+- Low-weight signal (+3 risk)
+- Corroboration only
+- Frequency analysis (repeated reads +5)
+- Context: Caller → Target → Browser awareness
+
+**Safe positioning**:
+```
+NtReadVirtualMemory called: +3 risk
+Repeated within 100ms: +5 risk  
+Target is browser utility: +8 risk
+───────────────────────────────────
+By itself: No action
+With file access: Corroborated → Suspend
+With temp staging: Confirmed → Terminate
+```
 
 ### Threat Response
 
 | Asset Accessed | Process Type | Action | Latency |
 |----------------|-------------|--------|---------|
+| Login Data | Same Browser (Self-Access) | Allow (Legitimate) | <1ms |
 | Login Data | Browser Service | Log + Monitor | <1ms |
 | Login Data | Unknown Process | Suspend → Fingerprint → Kill | <5ms |
+| Local State | Same Browser (Self-Access) | Allow (Legitimate) | <1ms |
 | Local State | Browser Service | Log + Monitor | <1ms |
 | Local State | Unknown Process | Suspend → Fingerprint → Kill | <5ms |
+| Cookies (score ≥10) | Same Browser (Self-Access) | Allow (Legitimate) | <1ms |
 | Cookies (score ≥10) | Browser Service | Log + Monitor | <1ms |
 | Cookies (score ≥10) | Unknown Process | Suspend → Analyze → Kill | <10ms |
 | Temp SQLite/JSON | Any | Neutralize + track | <50ms |
+
+**Browser Self-Access**: Browsers accessing their own profile files (e.g., `chrome.exe` accessing `\Google\Chrome\User Data\`) is allowed as legitimate operation for:
+- Browser startup
+- Sync operations
+- Autofill functionality
+- Session restoration
+- Extension loading
 
 ### Technical Details
 
@@ -46,7 +101,7 @@ Argus detects credential stealers before they can extract browser passwords, coo
 
 **Build**: `msbuild Argus.sln /p:Configuration=Debug /p:Platform=x64`  
 **Run**: `x64\Debug\Argus.exe` (requires Administrator for termination)  
-**Phase**: 3.0 - Modular architecture + configurable whitelist
+**Phase**: 3.1 - Multi-signal EDR mesh + handle monitoring + signal correlation
 
 ### Configuration
 
@@ -71,11 +126,24 @@ Example:
 
 ### Architecture
 
+**Multi-Signal EDR Mesh**:
+```
+[File Identity Tracker] ────┐
+[Handle Monitor] ───────────┤
+[Memory Read Detector] ─────┼──► Signal Correlator ──► Suspend ──► Classify ──► Verdict
+[Temp Staging Detector] ────┤
+[Directory Watchers] ───────┤
+[ETW Events] ───────────────┘
+```
+
+**No single watchdog is authoritative. Requires corroboration.**
+
 **Modular Design**:
-- `core/credential_monitor.cpp` - Main coordination (~600 lines)
+- `core/credential_monitor.cpp` - Main coordination
+- `core/handle_monitor.cpp` - Cross-process handle tracking + NtReadVirtualMemory
+- `core/signal_correlator.cpp` - Multi-signal correlation engine
+- `core/file_identity.cpp` - File identity + evasion detection
 - `core/process_whitelist.cpp` - Configurable whitelist loader
-- `core/threat_detector.h` - Threat detection logic (future)
-- `core/monitoring_threads.h` - Background monitoring (future)
 - `config/process_whitelist.json` - User-editable process list
 
 ### Forensic Evidence

@@ -291,6 +291,15 @@ if (!SetConsoleCtrlHandler(ConsoleHandler, TRUE)) {
         process_monitor.Update();
         credential_monitor.Update();
 
+        // Refresh known-bad list periodically so newly captured threats are enforced quickly.
+        static auto last_threats_refresh = std::chrono::steady_clock::now() - std::chrono::seconds(10);
+        static std::vector<std::string> cached_bad_hashes;
+        auto now_refresh = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now_refresh - last_threats_refresh).count() >= 1) {
+            argus::ThreatFingerprint::LoadKnownBadSha256(cached_bad_hashes);
+            last_threats_refresh = now_refresh;
+        }
+
         // Instant-kill known threats (opt-in): check newly started processes against threats/ fingerprints.
         // NOTE: ConsumeNewProcesses() is populated by ProcessMonitor::Update() on its scan interval.
         if (instant_kill_known_threats) {
@@ -314,7 +323,7 @@ if (!SetConsoleCtrlHandler(ConsoleHandler, TRUE)) {
                     continue;
                 }
 
-                if (argus::ThreatFingerprint::IsKnownBadSha256(sha)) {
+                if (std::find(cached_bad_hashes.begin(), cached_bad_hashes.end(), sha) != cached_bad_hashes.end()) {
                     logger.Log(argus::LogLevel::Warning,
                                std::string("[InstantKill] Known threat hash match: ") + sha + " pid=" + std::to_string(p.pid));
 

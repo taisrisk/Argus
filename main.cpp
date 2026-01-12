@@ -153,6 +153,9 @@ if (!SetConsoleCtrlHandler(ConsoleHandler, TRUE)) {
     
     logger.Log(argus::LogLevel::Info, "Initializing Argus monitors");
     
+    // Start auto-refresh threat database (background thread with 1s polling + directory watcher).
+    argus::ThreatFingerprint::StartAutoRefresh();
+    
     process_monitor.Initialize();
 
     if (network_monitoring_enabled) {
@@ -263,6 +266,13 @@ if (!SetConsoleCtrlHandler(ConsoleHandler, TRUE)) {
     logger.Log(argus::LogLevel::Info, "All monitors initialized successfully");
     logger.Log(argus::LogLevel::Info, extension_scan_consent ? 
                "Extension scanning: ENABLED" : "Extension scanning: DISABLED");
+    logger.Log(argus::LogLevel::Info, instant_kill_known_threats ?
+               "Instant-kill known threats: ENABLED" : "Instant-kill known threats: DISABLED");
+    
+    if (instant_kill_known_threats) {
+        std::cout << "[ThreatDB] Known-bad hashes loaded: " << argus::ThreatFingerprint::GetKnownBadCount() << std::endl;
+    }
+    
     if (extension_runtime.IsActive()) {
         logger.Log(argus::LogLevel::Info, "[ExtensionRuntime] CDP enabled on port " + std::to_string(extension_runtime.GetPort()));
     } else {
@@ -274,7 +284,7 @@ if (!SetConsoleCtrlHandler(ConsoleHandler, TRUE)) {
     std::cout << std::endl;
     std::cout.flush();
     
-    const int main_loop_interval = 2;
+    const int main_loop_interval_ms = 100; // 100ms for instant threat detection
     const int extension_scan_interval_seconds = 300;
     const int event_batch_size = 10;
     
@@ -291,20 +301,13 @@ if (!SetConsoleCtrlHandler(ConsoleHandler, TRUE)) {
         process_monitor.Update();
         credential_monitor.Update();
 
-        // Refresh known-bad list periodically so newly captured threats are enforced quickly.
-        static auto last_threats_refresh = std::chrono::steady_clock::now() - std::chrono::seconds(10);
-        static std::vector<std::string> cached_bad_hashes;
-        auto now_refresh = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::seconds>(now_refresh - last_threats_refresh).count() >= 1) {
-            argus::ThreatFingerprint::LoadKnownBadSha256(cached_bad_hashes);
-            last_threats_refresh = now_refresh;
-        }
-
         // Instant-kill known threats (opt-in): check newly started processes against threats/ fingerprints.
         // NOTE: ConsumeNewProcesses() is populated by ProcessMonitor::Update() on its scan interval.
         if (instant_kill_known_threats) {
             auto new_procs = process_monitor.ConsumeNewProcesses();
             for (const auto& p : new_procs) {
+                // If we couldn't query the image path (common without admin), fall back to
+                // letting the other monitors handle it.
                 if (p.image_path.empty()) continue;
 
                 std::wstring wpath;
@@ -323,24 +326,29 @@ if (!SetConsoleCtrlHandler(ConsoleHandler, TRUE)) {
                     continue;
                 }
 
-                if (std::find(cached_bad_hashes.begin(), cached_bad_hashes.end(), sha) != cached_bad_hashes.end()) {
-                    logger.Log(argus::LogLevel::Warning,
-                               std::string("[InstantKill] Known threat hash match: ") + sha + " pid=" + std::to_string(p.pid));
-
-                    std::string summary;
-                    if (!argus::ThreatFingerprint::LoadThreatSummary(sha, summary)) {
-                        summary = "Known threat fingerprint matched\n";
-                        summary += "  sha256: " + sha + "\n";
-                    }
-
-                    std::cout << "\n[AUTO-BLOCKED] Prevented known threat from running\n"
-                              << summary
-                              << "  current_pid: " << p.pid << "\n"
-                              << "  current_image_path: " << p.image_path << "\n"
-                              << std::endl;
-                    // Best-effort: terminate immediately.
-                    credential_monitor.KillProcess(p.pid);
+                if (!argus::ThreatFingerprint::IsKnownBadSha256(sha)) {
+                    continue;
                 }
+
+                logger.Log(argus::LogLevel::Warning,
+                           std::string("[InstantKill] Known threat hash match: ") + sha + " pid=" + std::to_string(p.pid));
+
+                std::string summary;
+                if (!argus::ThreatFingerprint::LoadThreatSummary(sha, summary)) {
+                    summary = "Known threat fingerprint matched\n";
+                    summary += "  sha256: " + sha + "\n";
+                }
+
+                std::cout << "\n[AUTO-BLOCKED] Prevented known threat from running\n"
+                          << summary
+                          << "  current_pid: " << p.pid << "\n"
+                          << "  current_image_path: " << p.image_path << "\n"
+                          << std::endl;
+
+                // Best-effort: terminate immediately.
+                credential_monitor.KillProcess(p.pid);
+
+                // Immediate refresh after auto-block is handled automatically by the background thread.
             }
         }
 
@@ -547,13 +555,16 @@ if (!SetConsoleCtrlHandler(ConsoleHandler, TRUE)) {
             last_assessment_count = risk_engine.GetAssessments().size();
         }
         
-        std::this_thread::sleep_for(std::chrono::seconds(main_loop_interval));
+        std::this_thread::sleep_for(std::chrono::milliseconds(main_loop_interval_ms));
         cycle++;
     }
     
     std::cout << std::endl;
     std::cout << "Shutting down..." << std::endl;
     logger.Log(argus::LogLevel::Info, "Shutdown initiated");
+    
+    // Stop auto-refresh thread.
+    argus::ThreatFingerprint::StopAutoRefresh();
     
     session.Shutdown();
     

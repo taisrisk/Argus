@@ -20,13 +20,54 @@
 #include <algorithm>
 #include <fstream>
 #include <sstream>
+#include <unordered_set>
+#include <thread>
+#include <mutex>
+#include <atomic>
+#include <iostream>
+#include <winternl.h>
 
 #pragma comment(lib, "crypt32.lib")
 #pragma comment(lib, "advapi32.lib")
 #pragma comment(lib, "wintrust.lib")
 #pragma comment(lib, "psapi.lib")
+#pragma comment(lib, "ntdll.lib")
+
+typedef VOID (NTAPI *PIO_APC_ROUTINE_CUSTOM)(
+    PVOID ApcContext,
+    PIO_STATUS_BLOCK IoStatusBlock,
+    ULONG Reserved
+);
+
+extern "C" NTSTATUS NTAPI NtNotifyChangeDirectoryFile(
+    HANDLE FileHandle,
+    HANDLE Event,
+    PIO_APC_ROUTINE_CUSTOM ApcRoutine,
+    PVOID ApcContext,
+    PIO_STATUS_BLOCK IoStatusBlock,
+    PVOID Buffer,
+    ULONG Length,
+    ULONG CompletionFilter,
+    BOOLEAN WatchTree
+);
 
 namespace argus {
+
+// Global state for auto-refresh background thread.
+static std::mutex s_known_bad_mutex;
+static std::unordered_set<std::string> s_known_bad_set;
+static std::atomic<size_t> s_known_bad_count{0};
+static std::atomic<bool> s_refresh_running{false};
+static std::thread s_refresh_thread;
+
+std::string ThreatFingerprint::GetThreatsDir() {
+    char exePath[MAX_PATH] = {0};
+    GetModuleFileNameA(nullptr, exePath, MAX_PATH);
+    std::string base(exePath);
+    size_t slash = base.find_last_of("\\/");
+    if (slash != std::string::npos) base = base.substr(0, slash);
+    return base + "\\threats";
+}
 
 static std::wstring Utf8ToWideLocal(const std::string& s) {
     if (s.empty()) return L"";
@@ -286,28 +327,52 @@ bool ThreatFingerprint::CheckAuthenticodeSignature(const std::wstring& path,
 void ThreatFingerprint::LoadKnownBadSha256(std::vector<std::string>& out_hashes) {
     out_hashes.clear();
 
+    std::string threatsDir = GetThreatsDir();
+    std::string blacklistPath = threatsDir + "\\blacklist.txt";
+
+    // Ensure the directory exists so FindFirstFile doesn't fail on first run.
+    CreateDirectoryA(threatsDir.c_str(), nullptr);
+
     // Optional: threats/blacklist.txt (one sha256 per line)
     {
-        std::ifstream f("threats/blacklist.txt");
+        std::ifstream f(blacklistPath);
         if (f) {
             std::string line;
             while (std::getline(f, line)) {
                 line.erase(std::remove_if(line.begin(), line.end(), ::isspace), line.end());
-                if (line.size() == 64) out_hashes.push_back(line);
+                if (line.size() == 64) {
+                    // Convert to lowercase for consistency.
+                    std::transform(line.begin(), line.end(), line.begin(), ::tolower);
+                    out_hashes.push_back(line);
+                }
             }
         }
     }
 
-    // Also load from threats/<sha256>/hashes.json if present.
+    // Also load from threats/<sha256>/ subdirectories.
     WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA("threats\\*", &fd);
+    std::string glob = threatsDir + "\\*";
+    HANDLE h = FindFirstFileA(glob.c_str(), &fd);
     if (h != INVALID_HANDLE_VALUE) {
         do {
             if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
             std::string name = fd.cFileName;
             if (name == "." || name == "..") continue;
+            
+            // Check if this is a 64-char hex directory (SHA-256 fingerprint).
             if (name.size() == 64) {
-                out_hashes.push_back(name);
+                bool all_hex = true;
+                for (char c : name) {
+                    if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'))) {
+                        all_hex = false;
+                        break;
+                    }
+                }
+                if (all_hex) {
+                    // Convert to lowercase for consistency.
+                    std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+                    out_hashes.push_back(name);
+                }
             }
         } while (FindNextFileA(h, &fd));
         FindClose(h);
@@ -317,19 +382,153 @@ void ThreatFingerprint::LoadKnownBadSha256(std::vector<std::string>& out_hashes)
     out_hashes.erase(std::unique(out_hashes.begin(), out_hashes.end()), out_hashes.end());
 }
 
-bool ThreatFingerprint::IsKnownBadSha256(const std::string& sha256) {
+void ThreatFingerprint::RefreshKnownBadNow() {
     std::vector<std::string> hashes;
     LoadKnownBadSha256(hashes);
-    return std::find(hashes.begin(), hashes.end(), sha256) != hashes.end();
+    
+    std::unordered_set<std::string> new_set(hashes.begin(), hashes.end());
+    
+    {
+        std::lock_guard<std::mutex> lock(s_known_bad_mutex);
+        s_known_bad_set = std::move(new_set);
+        s_known_bad_count.store(s_known_bad_set.size());
+    }
+    
+    // Diagnostic output (throttled to every 30 seconds to avoid spam).
+    static std::mutex log_mutex;
+    static auto last_log = std::chrono::steady_clock::now() - std::chrono::seconds(60);
+    auto now = std::chrono::steady_clock::now();
+    
+    std::lock_guard<std::mutex> log_lock(log_mutex);
+    if (std::chrono::duration_cast<std::chrono::seconds>(now - last_log).count() >= 30) {
+        std::cout << "[ThreatDB] Refreshed: " << s_known_bad_count.load() << " known-bad hashes" << std::endl;
+        last_log = now;
+    }
+}
+
+size_t ThreatFingerprint::GetKnownBadCount() {
+    return s_known_bad_count.load();
+}
+
+static void RefreshThreadLoop() {
+    std::string threatsDir = ThreatFingerprint::GetThreatsDir();
+    
+    // Initial diagnostic output.
+    std::cout << "[ThreatDB] ThreatsDir=" << threatsDir << std::endl;
+    
+    // Initial refresh.
+    ThreatFingerprint::RefreshKnownBadNow();
+    
+    // Directory watcher setup.
+    HANDLE hDir = CreateFileA(
+        threatsDir.c_str(),
+        FILE_LIST_DIRECTORY,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
+        nullptr);
+    
+    HANDLE hCompletion = nullptr;
+    if (hDir != INVALID_HANDLE_VALUE) {
+        hCompletion = CreateIoCompletionPort(hDir, nullptr, 0, 1);
+    }
+    
+    char buffer[4096];
+    IO_STATUS_BLOCK iosb;
+    bool watch_active = false;
+    
+    if (hDir != INVALID_HANDLE_VALUE && hCompletion) {
+        ZeroMemory(&iosb, sizeof(iosb));
+        
+        NTSTATUS st = NtNotifyChangeDirectoryFile(
+            hDir, hCompletion, nullptr, nullptr, &iosb,
+            buffer, sizeof(buffer),
+            FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_FILE_NAME,
+            FALSE);
+        
+        watch_active = (st == 0 || st == 0x103);
+    }
+    
+    auto last_poll = std::chrono::steady_clock::now();
+    
+    while (s_refresh_running.load()) {
+        bool should_refresh = false;
+        
+        // 1. Check directory watcher for changes.
+        if (watch_active) {
+            DWORD bytesTransferred = 0;
+            ULONG_PTR completionKey = 0;
+            LPOVERLAPPED pOverlapped = nullptr;
+            
+            if (GetQueuedCompletionStatus(hCompletion, &bytesTransferred, &completionKey, &pOverlapped, 50)) {
+                if (bytesTransferred > 0) {
+                    should_refresh = true;
+                    
+                    // Re-arm the watcher.
+                    ZeroMemory(&iosb, sizeof(iosb));
+                    NtNotifyChangeDirectoryFile(
+                        hDir, hCompletion, nullptr, nullptr, &iosb,
+                        buffer, sizeof(buffer),
+                        FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_FILE_NAME,
+                        FALSE);
+                }
+            }
+        }
+        
+        // 2. Periodic 1-second poll.
+        auto now = std::chrono::steady_clock::now();
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_poll).count() >= 1000) {
+            should_refresh = true;
+            last_poll = now;
+        }
+        
+        if (should_refresh) {
+            ThreatFingerprint::RefreshKnownBadNow();
+        }
+        
+        if (!watch_active) {
+            Sleep(100);
+        }
+    }
+    
+    if (hCompletion) CloseHandle(hCompletion);
+    if (hDir != INVALID_HANDLE_VALUE) CloseHandle(hDir);
+}
+
+void ThreatFingerprint::StartAutoRefresh() {
+    if (s_refresh_running.load()) {
+        return;
+    }
+    
+    s_refresh_running.store(true);
+    s_refresh_thread = std::thread(RefreshThreadLoop);
+}
+
+void ThreatFingerprint::StopAutoRefresh() {
+    if (!s_refresh_running.load()) {
+        return;
+    }
+    
+    s_refresh_running.store(false);
+    if (s_refresh_thread.joinable()) {
+        s_refresh_thread.join();
+    }
+}
+
+bool ThreatFingerprint::IsKnownBadSha256(const std::string& sha256) {
+    std::lock_guard<std::mutex> lock(s_known_bad_mutex);
+    return s_known_bad_set.find(sha256) != s_known_bad_set.end();
 }
 
 bool ThreatFingerprint::LoadThreatSummary(const std::string& sha256, std::string& out_summary) {
-    out_summary.clear();
-    if (sha256.size() != 64) return false;
+out_summary.clear();
+if (sha256.size() != 64) return false;
 
-    std::string metaPath = std::string("threats/") + sha256 + "/meta.json";
-    std::ifstream f(metaPath, std::ios::in | std::ios::binary);
-    if (!f) return false;
+std::string threatsDir = GetThreatsDir();
+std::string metaPath = threatsDir + "\\" + sha256 + "\\meta.json";
+std::ifstream f(metaPath, std::ios::in | std::ios::binary);
+if (!f) return false;
 
     std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
     if (json.empty()) return false;
@@ -419,8 +618,19 @@ ThreatFingerprintResult ThreatFingerprint::CaptureForPid(uint32_t pid,
         return r;
     }
 
-    // Ensure threats/ and threats/<sha256>/
-    std::wstring threatsDir = L"threats";
+    // Ensure threats/ and threats/<sha256>/ next to the running exe.
+    std::string threatsDirA = GetThreatsDir();
+    std::wstring threatsDir;
+    {
+        int len = MultiByteToWideChar(CP_UTF8, 0, threatsDirA.c_str(), -1, nullptr, 0);
+        if (len > 0) {
+            threatsDir.resize(static_cast<size_t>(len - 1));
+            MultiByteToWideChar(CP_UTF8, 0, threatsDirA.c_str(), -1, &threatsDir[0], len);
+        }
+    }
+    if (threatsDir.empty()) {
+        threatsDir = L"threats";
+    }
     EnsureDir(threatsDir, err);
 
     std::wstring outDirW = threatsDir + L"\\" + Utf8ToWideLocal(r.sha256);
@@ -500,6 +710,10 @@ ThreatFingerprintResult ThreatFingerprint::CaptureForPid(uint32_t pid,
     }
 
     r.ok = true;
+    
+    // Immediately refresh the known-bad database so this threat is enforced on next launch.
+    RefreshKnownBadNow();
+    
     return r;
 }
 

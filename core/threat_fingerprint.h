@@ -22,6 +22,9 @@ struct ThreatFingerprintResult {
 
 class ThreatFingerprint {
 public:
+    // Returns the absolute path to the threats directory (next to the running exe).
+    static std::string GetThreatsDir();
+
     // Captures a fingerprint bundle for a running process.
     // Writes into threats/<sha256>/
     static ThreatFingerprintResult CaptureForPid(uint32_t pid,
@@ -49,6 +52,19 @@ public:
     // Loads a short human-readable summary for a known threat hash from threats/<sha256>/meta.json.
     // Best-effort, dependency-free parsing.
     static bool LoadThreatSummary(const std::string& sha256, std::string& out_summary);
+
+    // Forces an immediate refresh of the known-bad threat database.
+    // Call this after capturing a new fingerprint or terminating a threat.
+    static void RefreshKnownBadNow();
+
+    // Returns the current count of known-bad hashes (for diagnostics).
+    static size_t GetKnownBadCount();
+
+    // Starts the background refresh thread (1s polling + directory watcher).
+    static void StartAutoRefresh();
+
+    // Stops the background refresh thread.
+    static void StopAutoRefresh();
 
 private:
     static std::wstring GetProcessImagePathW(uint32_t pid, std::string& out_error);

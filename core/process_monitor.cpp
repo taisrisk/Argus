@@ -56,7 +56,8 @@ void ProcessMonitor::Update() {
     auto now = std::chrono::system_clock::now();
     auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_update_).count();
     
-    if (elapsed_ms >= 500) {
+    // Scan every 100ms for instant threat detection (<500ms requirement)
+    if (elapsed_ms >= 100) {
         ScanForNewProcesses();
         ScanForBrowserProcesses();
         UpdateProcessStates();

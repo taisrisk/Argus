@@ -132,6 +132,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="core\credential_monitor.cpp" />
+    <ClCompile Include="core\console_format.cpp" />
     <ClCompile Include="core\file_identity.cpp" />
     <ClCompile Include="core\file_neutralizer.cpp" />
     <ClCompile Include="core\handle_monitor.cpp" />
@@ -152,6 +153,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="core\credential_monitor.h" />
+    <ClInclude Include="core\console_format.h" />
     <ClInclude Include="core\file_identity.h" />
     <ClInclude Include="core\file_neutralizer.h" />
     <ClInclude Include="core\handle_monitor.h" />

@@ -5,6 +5,8 @@
 #include <chrono>
 #include <cstdint>
 #include <set>
+#include <unordered_map>
+#include <mutex>
 
 namespace argus {
 
@@ -42,6 +44,10 @@ private:
     bool IsWhitelisted(const std::string& address);
     bool IsBlacklisted(const std::string& address);
     bool IsSuspiciousPattern(const NetworkEvent& event);
+
+    // Best-effort reverse DNS (cached). Never blocks the hot path.
+    std::string TryResolveRemoteHostCached(const std::string& ip);
+    static bool IsPrivateOrLoopbackIPv4(const std::string& ip);
     
     bool is_active_;
     std::vector<NetworkEvent> events_;
@@ -49,6 +55,9 @@ private:
     std::set<std::string> whitelist_;
     std::set<std::string> blacklist_;
     std::chrono::system_clock::time_point last_scan_;
+
+    std::unordered_map<std::string, std::pair<std::string, std::chrono::steady_clock::time_point>> rdns_cache_;
+    std::mutex rdns_mutex_;
 };
 
 }

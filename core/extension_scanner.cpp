@@ -1,14 +1,27 @@
 #include "extension_scanner.h"
+
+// Keep windows.h lean and avoid winsock.h conflicts.
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef _WINSOCKAPI_
+#define _WINSOCKAPI_
+#endif
+
 #include <windows.h>
 #include <fstream>
 #include <sstream>
 #include <iostream>
 #include <algorithm>
+#include <vector>
 
 namespace argus {
 
 ExtensionScanner::ExtensionScanner() 
-    : is_active_(false), user_consent_(false), initial_scan_complete_(false), activity_monitoring_active_(false) {
+    : is_active_(false), user_consent_(false), initial_scan_complete_(false), activity_monitoring_active_(false), watcher_running_(false) {
 }
 
 ExtensionScanner::~ExtensionScanner() {
@@ -39,6 +52,24 @@ void ExtensionScanner::Shutdown() {
     findings_.clear();
     activity_events_.clear();
     monitored_extensions_.clear();
+}
+
+void ExtensionScanner::RecordActivityEvent(const std::string& ext_id,
+                                          const std::string& ext_name,
+                                          const std::string& file_path,
+                                          const std::string& change_type) {
+    ExtensionActivityEvent evt;
+    evt.extension_id = ext_id;
+    evt.extension_name = ext_name;
+    evt.file_path = file_path;
+    evt.change_type = change_type;
+    evt.timestamp = std::chrono::system_clock::now();
+    activity_events_.push_back(evt);
+
+    const size_t max_events = 500;
+    if (activity_events_.size() > max_events) {
+        activity_events_.erase(activity_events_.begin(), activity_events_.begin() + (activity_events_.size() - max_events));
+    }
 }
 
 void ExtensionScanner::PerformInitialScan(const std::string& browser_profile_path) {
@@ -447,6 +478,8 @@ void ExtensionScanner::StartActivityMonitoring() {
     if (!is_active_ || !user_consent_ || activity_monitoring_active_) {
         return;
     }
+
+    watcher_running_ = true;
     
     for (const auto& pair : monitored_extensions_) {
         StartWatchersForProfile(pair.second);
@@ -460,6 +493,8 @@ void ExtensionScanner::StopActivityMonitoring() {
     if (!activity_monitoring_active_) {
         return;
     }
+
+    watcher_running_ = false;
     
     for (auto& pair : extension_watcher_threads_) {
         if (pair.second) {
@@ -508,6 +543,20 @@ void ExtensionScanner::StartWatchersForProfile(const ExtensionMonitoringProfile&
     }
     
     watched_extension_paths_.insert(profile.extension_path);
+
+    // Spawn a watcher thread per extension id.
+    WatcherParam* param = new WatcherParam();
+    param->scanner = this;
+    param->extension_id = profile.extension_id;
+    param->extension_name = profile.extension_name;
+    param->watch_path = profile.extension_path;
+
+    HANDLE hThread = CreateThread(NULL, 0, ExtensionWatcherThread, param, 0, NULL);
+    if (hThread) {
+        extension_watcher_threads_[profile.extension_id] = hThread;
+    } else {
+        delete param;
+    }
 }
 
 void ExtensionScanner::StopWatchersForProfile(const std::string& extension_id) {
@@ -522,6 +571,89 @@ void ExtensionScanner::StopWatchersForProfile(const std::string& extension_id) {
 }
 
 DWORD WINAPI ExtensionScanner::ExtensionWatcherThread(LPVOID param) {
+    WatcherParam* p = reinterpret_cast<WatcherParam*>(param);
+    if (!p || !p->scanner) {
+        delete p;
+        return 1;
+    }
+
+    ExtensionScanner* scanner = p->scanner;
+    const std::string ext_id = p->extension_id;
+    const std::string ext_name = p->extension_name;
+    const std::string watch_path = p->watch_path;
+    delete p;
+
+    std::wstring wpath(watch_path.begin(), watch_path.end());
+    HANDLE hDir = CreateFileW(
+        wpath.c_str(),
+        FILE_LIST_DIRECTORY,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS,
+        NULL);
+
+    if (hDir == INVALID_HANDLE_VALUE) {
+        return 1;
+    }
+
+    std::vector<BYTE> buffer(64 * 1024);
+    DWORD bytesReturned = 0;
+
+    while (scanner->watcher_running_) {
+        BOOL ok = ReadDirectoryChangesW(
+            hDir,
+            buffer.data(),
+            static_cast<DWORD>(buffer.size()),
+            TRUE,
+            FILE_NOTIFY_CHANGE_FILE_NAME |
+                FILE_NOTIFY_CHANGE_DIR_NAME |
+                FILE_NOTIFY_CHANGE_LAST_WRITE |
+                FILE_NOTIFY_CHANGE_SIZE |
+                FILE_NOTIFY_CHANGE_CREATION,
+            &bytesReturned,
+            NULL,
+            NULL);
+
+        if (!ok) {
+            Sleep(250);
+            continue;
+        }
+
+        if (bytesReturned == 0) {
+            Sleep(50);
+            continue;
+        }
+
+        FILE_NOTIFY_INFORMATION* info = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(buffer.data());
+        while (true) {
+            std::wstring wname(info->FileName, info->FileNameLength / sizeof(WCHAR));
+            std::string name(wname.begin(), wname.end());
+            std::string full = watch_path + "\\" + name;
+
+            std::string change;
+            switch (info->Action) {
+                case FILE_ACTION_ADDED: change = "added"; break;
+                case FILE_ACTION_REMOVED: change = "removed"; break;
+                case FILE_ACTION_MODIFIED: change = "modified"; break;
+                case FILE_ACTION_RENAMED_OLD_NAME: change = "renamed_old"; break;
+                case FILE_ACTION_RENAMED_NEW_NAME: change = "renamed_new"; break;
+                default: change = "unknown"; break;
+            }
+
+            // Record activity.
+            scanner->RecordActivityEvent(ext_id, ext_name, full, change);
+
+            if (info->NextEntryOffset == 0) {
+                break;
+            }
+            info = reinterpret_cast<FILE_NOTIFY_INFORMATION*>(reinterpret_cast<BYTE*>(info) + info->NextEntryOffset);
+        }
+
+        Sleep(10);
+    }
+
+    CloseHandle(hDir);
     return 0;
 }
 
@@ -529,7 +661,6 @@ std::vector<ExtensionActivityEvent> ExtensionScanner::GetRecentActivity(int max_
     if (activity_events_.size() <= static_cast<size_t>(max_count)) {
         return activity_events_;
     }
-    
     return std::vector<ExtensionActivityEvent>(activity_events_.end() - max_count, activity_events_.end());
 }
 

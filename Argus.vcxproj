@@ -147,6 +147,8 @@
     <ClCompile Include="core\logger.cpp" />
     <ClCompile Include="platform\win32.cpp" />
     <ClCompile Include="core\prevention_logger.cpp" />
+    <ClCompile Include="core\extension_runtime_cdp.cpp" />
+    <ClCompile Include="core\threat_fingerprint.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="core\credential_monitor.h" />
@@ -165,6 +167,8 @@
     <ClInclude Include="core\logger.h" />
     <ClInclude Include="core\signal_correlator.h" />
     <ClInclude Include="core\threat_detector.h" />
+    <ClInclude Include="core\extension_runtime_cdp.h" />
+    <ClInclude Include="core\threat_fingerprint.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include=".gitignore" />

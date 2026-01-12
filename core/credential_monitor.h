@@ -129,6 +129,9 @@ public:
     ProcessFingerprint ExtractFingerprint(uint32_t pid);
     ThreatAction DecideThreatAction(const ThreatChain& chain);
     bool KillProcess(uint32_t pid);
+
+    // Phase 3.1 response pipeline
+    bool SuspendAndAssess(uint32_t pid, const std::string& reason, const std::vector<std::string>& accessed_files);
     
     void OnFileAccess(uint32_t pid, const std::wstring& filepath);
     
@@ -159,6 +162,9 @@ private:
     bool IsProcessSuspicious(uint32_t pid);
     void AnalyzeAccessPatterns();
     int CalculateRiskScore(const ThreatChain& chain);
+
+    // Helpers
+    bool ShouldEmergencyTerminateSingleSignal(AssetType asset_type) const;
     
     bool is_active_;
     std::vector<SensitiveAsset> asset_registry_;

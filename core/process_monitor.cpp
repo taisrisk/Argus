@@ -3,6 +3,16 @@
 #include <tlhelp32.h>
 #include <algorithm>
 
+static std::string WideToUtf8(const std::wstring& w) {
+    if (w.empty()) return "";
+    int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    if (len <= 0) return "";
+    std::string out;
+    out.resize(static_cast<size_t>(len - 1));
+    WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, &out[0], len, nullptr, nullptr);
+    return out;
+}
+
 namespace argus {
 
 ProcessMonitor::ProcessMonitor() 
@@ -23,6 +33,7 @@ bool ProcessMonitor::Initialize() {
     is_active_ = true;
     last_update_ = std::chrono::system_clock::now();
     ScanForBrowserProcesses();
+    ScanForNewProcesses();
     
     return true;
 }
@@ -46,10 +57,67 @@ void ProcessMonitor::Update() {
     auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last_update_).count();
     
     if (elapsed >= 5) {
+        ScanForNewProcesses();
         ScanForBrowserProcesses();
         UpdateProcessStates();
         last_update_ = now;
     }
+}
+
+std::vector<ProcessStartInfo> ProcessMonitor::ConsumeNewProcesses() {
+    std::vector<ProcessStartInfo> out;
+    out.swap(new_processes_);
+    return out;
+}
+
+void ProcessMonitor::ScanForNewProcesses() {
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        return;
+    }
+
+    PROCESSENTRY32W pe32;
+    pe32.dwSize = sizeof(PROCESSENTRY32W);
+
+    std::vector<uint32_t> current;
+    if (Process32FirstW(snapshot, &pe32)) {
+        do {
+            current.push_back(pe32.th32ProcessID);
+        } while (Process32NextW(snapshot, &pe32));
+    }
+    CloseHandle(snapshot);
+
+    // First run: just seed.
+    if (last_seen_pids_.empty()) {
+        last_seen_pids_ = current;
+        return;
+    }
+
+    // Find new PIDs.
+    for (uint32_t pid : current) {
+        if (std::find(last_seen_pids_.begin(), last_seen_pids_.end(), pid) != last_seen_pids_.end()) {
+            continue;
+        }
+
+        // Best-effort image path.
+        std::string image_path;
+        HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (hProc) {
+            wchar_t buf[MAX_PATH];
+            DWORD sz = MAX_PATH;
+            if (QueryFullProcessImageNameW(hProc, 0, buf, &sz)) {
+                image_path = WideToUtf8(std::wstring(buf, buf + sz));
+            }
+            CloseHandle(hProc);
+        }
+
+        ProcessStartInfo si;
+        si.pid = pid;
+        si.image_path = image_path;
+        new_processes_.push_back(si);
+    }
+
+    last_seen_pids_ = current;
 }
 
 std::vector<ProcessEvent> ProcessMonitor::GetRecentEvents(int max_count) {

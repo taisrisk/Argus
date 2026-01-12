@@ -1,8 +1,21 @@
 #include "network_monitor.h"
+
+// Prevent winsock.h from being pulled in by windows.h (possibly via headers).
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef _WINSOCKAPI_
+#define _WINSOCKAPI_
+#endif
+
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
 #include <algorithm>
+#include <cctype>
 
 #pragma comment(lib, "iphlpapi.lib")
 #pragma comment(lib, "ws2_32.lib")
@@ -107,12 +120,21 @@ void NetworkMonitor::ScanConnections() {
                 inet_ntop(AF_INET, &addr, ip_str, INET_ADDRSTRLEN);
                 event.remote_address = ip_str;
                 event.remote_port = ntohs((u_short)tcpTable->table[i].dwRemotePort);
+
+                // Fast allow-list: local/private IPv4 should not be treated as exfil.
+                if (IsPrivateOrLoopbackIPv4(event.remote_address)) {
+                    continue;
+                }
+
+                // Best-effort: resolve IP -> hostname (cached) so domain whitelist can work.
+                // If resolution fails, we keep using the IP string.
+                std::string resolved_host = TryResolveRemoteHostCached(event.remote_address);
                 
-                if (IsWhitelisted(event.remote_address)) {
+                if (IsWhitelisted(resolved_host.empty() ? event.remote_address : resolved_host)) {
                     continue;
                 }
                 
-                if (IsBlacklisted(event.remote_address)) {
+                if (IsBlacklisted(resolved_host.empty() ? event.remote_address : resolved_host)) {
                     event.is_suspicious = true;
                     event.context = "Blacklisted destination";
                 } else if (IsSuspiciousPattern(event)) {
@@ -120,7 +142,7 @@ void NetworkMonitor::ScanConnections() {
                     event.context = "Suspicious connection pattern";
                 } else {
                     event.is_suspicious = false;
-                    event.context = "Unknown destination";
+                    event.context = resolved_host.empty() ? "Unknown destination" : ("Unknown destination: " + resolved_host);
                 }
                 
                 events_.push_back(event);
@@ -131,6 +153,79 @@ void NetworkMonitor::ScanConnections() {
     if (tcpTable) {
         free(tcpTable);
     }
+}
+
+static std::string ToLowerAscii(std::string s) {
+    for (char& c : s) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return s;
+}
+
+bool NetworkMonitor::IsPrivateOrLoopbackIPv4(const std::string& ip) {
+    IN_ADDR addr{};
+    if (inet_pton(AF_INET, ip.c_str(), &addr) != 1) {
+        return false;
+    }
+
+    uint32_t host = ntohl(addr.S_un.S_addr);
+    uint8_t a = static_cast<uint8_t>((host >> 24) & 0xFF);
+    uint8_t b = static_cast<uint8_t>((host >> 16) & 0xFF);
+
+    // 127.0.0.0/8 loopback
+    if (a == 127) return true;
+    // 10.0.0.0/8
+    if (a == 10) return true;
+    // 172.16.0.0/12
+    if (a == 172 && (b >= 16 && b <= 31)) return true;
+    // 192.168.0.0/16
+    if (a == 192 && b == 168) return true;
+    // 169.254.0.0/16 link-local
+    if (a == 169 && b == 254) return true;
+
+    return false;
+}
+
+std::string NetworkMonitor::TryResolveRemoteHostCached(const std::string& ip) {
+    // Cache TTL: 10 minutes
+    constexpr auto kTtl = std::chrono::minutes(10);
+    const auto now = std::chrono::steady_clock::now();
+
+    {
+        std::lock_guard<std::mutex> lock(rdns_mutex_);
+        auto it = rdns_cache_.find(ip);
+        if (it != rdns_cache_.end()) {
+            if ((now - it->second.second) < kTtl) {
+                return it->second.first;
+            }
+            rdns_cache_.erase(it);
+        }
+    }
+
+    // Best-effort reverse DNS. This can block in some environments, so we keep it conservative:
+    // - only attempt for public IPv4
+    // - short-circuit if parsing fails
+    sockaddr_in sa{};
+    sa.sin_family = AF_INET;
+    if (inet_pton(AF_INET, ip.c_str(), &sa.sin_addr) != 1) {
+        return "";
+    }
+
+    char host[NI_MAXHOST] = {0};
+    int rc = getnameinfo(reinterpret_cast<sockaddr*>(&sa), sizeof(sa), host, sizeof(host), nullptr, 0, NI_NAMEREQD);
+    if (rc != 0) {
+        // Cache negative result briefly to avoid repeated lookups.
+        std::lock_guard<std::mutex> lock(rdns_mutex_);
+        rdns_cache_[ip] = {"", now};
+        return "";
+    }
+
+    std::string resolved = ToLowerAscii(std::string(host));
+    {
+        std::lock_guard<std::mutex> lock(rdns_mutex_);
+        rdns_cache_[ip] = {resolved, now};
+    }
+    return resolved;
 }
 
 bool NetworkMonitor::IsWhitelisted(const std::string& address) {

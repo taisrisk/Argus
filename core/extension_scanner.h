@@ -6,6 +6,7 @@
 #include <map>
 #include <set>
 #include <windows.h>
+#include <atomic>
 
 namespace argus {
 
@@ -87,11 +88,24 @@ RiskLevel AssessPermissions(const std::vector<std::string>& permissions);
     void StartWatchersForProfile(const ExtensionMonitoringProfile& profile);
     void StopWatchersForProfile(const std::string& extension_id);
     static DWORD WINAPI ExtensionWatcherThread(LPVOID param);
+
+    struct WatcherParam {
+        ExtensionScanner* scanner;
+        std::string extension_id;
+        std::string extension_name;
+        std::string watch_path;
+    };
+
+    void RecordActivityEvent(const std::string& ext_id,
+                             const std::string& ext_name,
+                             const std::string& file_path,
+                             const std::string& change_type);
     
     bool is_active_;
     bool user_consent_;
     bool initial_scan_complete_;
     bool activity_monitoring_active_;
+    std::atomic<bool> watcher_running_;
     std::vector<ExtensionFinding> findings_;
     std::vector<ExtensionActivityEvent> activity_events_;
     std::map<std::string, ExtensionMonitoringProfile> monitored_extensions_;

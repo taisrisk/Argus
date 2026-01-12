@@ -1,4 +1,16 @@
 #include "credential_monitor.h"
+
+// Keep windows.h lean and avoid winsock.h conflicts.
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef _WINSOCKAPI_
+#define _WINSOCKAPI_
+#endif
+
 #include <windows.h>
 #include <psapi.h>
 #include <tlhelp32.h>
@@ -9,6 +21,8 @@
 #include <fstream>
 #include <sys/stat.h>
 #include <set>
+
+#include "threat_fingerprint.h"
 
 #pragma comment(lib, "psapi.lib")
 #pragma comment(lib, "ntdll.lib")
@@ -47,6 +61,135 @@ CredentialMonitor::CredentialMonitor()
     : is_active_(false), session_handle_(0), trace_handle_(0), etw_running_(false), 
       polling_thread_(NULL), temp_watcher_thread_(NULL) {
     s_instance = this;
+}
+
+static bool SetAllThreadsSuspendState(uint32_t pid, bool suspend) {
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+
+    THREADENTRY32 te;
+    te.dwSize = sizeof(te);
+
+    bool any = false;
+    bool ok_all = true;
+
+    if (Thread32First(snapshot, &te)) {
+        do {
+            if (te.th32OwnerProcessID != pid) {
+                continue;
+            }
+
+            any = true;
+            HANDLE hThread = OpenThread(THREAD_SUSPEND_RESUME, FALSE, te.th32ThreadID);
+            if (!hThread) {
+                ok_all = false;
+                continue;
+            }
+
+            if (suspend) {
+                if (SuspendThread(hThread) == (DWORD)-1) {
+                    ok_all = false;
+                }
+            } else {
+                // Resume until fully resumed.
+                for (;;) {
+                    DWORD prev = ResumeThread(hThread);
+                    if (prev == (DWORD)-1) {
+                        ok_all = false;
+                        break;
+                    }
+                    if (prev <= 1) {
+                        break;
+                    }
+                }
+            }
+
+            CloseHandle(hThread);
+        } while (Thread32Next(snapshot, &te));
+    }
+
+    CloseHandle(snapshot);
+    return any && ok_all;
+}
+
+bool CredentialMonitor::SuspendProcess(uint32_t pid) {
+    return SetAllThreadsSuspendState(pid, true);
+}
+
+bool CredentialMonitor::ResumeProcess(uint32_t pid) {
+    return SetAllThreadsSuspendState(pid, false);
+}
+
+bool CredentialMonitor::ShouldEmergencyTerminateSingleSignal(AssetType asset_type) const {
+    // Phase 3.1 policy: no single watchdog is authoritative.
+    // Keep an emergency override for the most critical assets, but default to OFF.
+    // If you want the old behavior, flip this to true for LoginData/LocalState.
+    (void)asset_type;
+    return false;
+}
+
+bool CredentialMonitor::SuspendAndAssess(uint32_t pid, const std::string& reason, const std::vector<std::string>& accessed_files) {
+    // Suspend -> fingerprint -> correlate -> decide -> terminate/monitor
+    // NOTE: Fingerprinting is currently a stub in this codebase; we still keep the pipeline.
+    std::string process_path = GetProcessPath(pid);
+
+    std::cout << "========================================" << std::endl;
+    std::cout << ">>> ACTION: SUSPEND -> ASSESS" << std::endl;
+    std::cout << "    Reason: " << reason << std::endl;
+    std::cout << "    PID: " << pid << std::endl;
+    std::cout << "    Process: " << process_path << std::endl;
+
+    bool suspended = SuspendProcess(pid);
+    if (!suspended) {
+        std::cout << "    [WARN] Could not suspend (insufficient rights). Continuing assessment." << std::endl;
+    }
+
+    // Record a prevention event for audit trail (even if we end up monitoring).
+    std::vector<std::string> neutralized_files;
+    std::string event_id = PreventionLogger::LogPrevention(
+        pid, process_path, reason, accessed_files, neutralized_files);
+
+    // Correlator decides based on mesh.
+    bool should_terminate = signal_correlator_.ShouldTerminate(pid);
+    std::string classification = signal_correlator_.ClassifyThreat(pid);
+
+    std::cout << "    Correlation: " << classification << std::endl;
+
+    if (should_terminate) {
+        std::cout << ">>> MULTI-SIGNAL CONFIRMED: TERMINATING" << std::endl;
+
+        // Capture threat fingerprint bundle before termination.
+        {
+            ThreatFingerprintResult fr = ThreatFingerprint::CaptureForPid(pid, reason, classification, accessed_files);
+            if (fr.ok) {
+                std::cout << "    [Forensics] Saved threat fingerprint: " << fr.output_dir << std::endl;
+            } else {
+                std::cout << "    [Forensics][WARN] Fingerprint capture failed: " << fr.error << std::endl;
+            }
+        }
+
+        if (KillProcess(pid)) {
+            std::cout << ">>> SUCCESS: Process terminated" << std::endl;
+            FileNeutralizer::ContinuousScanAndNeutralize(pid, process_path, event_id, 5000);
+            FileNeutralizer::DeepScanAndNeutralize(pid, process_path, event_id);
+        } else {
+            std::cout << ">>> FAILURE: Could not terminate" << std::endl;
+            if (suspended) {
+                ResumeProcess(pid);
+            }
+        }
+        PreventionLogger::DisplayPreventionCertificate(event_id);
+        return true;
+    }
+
+    // Not corroborated: resume and monitor.
+    std::cout << ">>> Not corroborated yet: monitoring" << std::endl;
+    if (suspended) {
+        ResumeProcess(pid);
+    }
+    return false;
 }
 
 CredentialMonitor::~CredentialMonitor() {
@@ -418,8 +561,7 @@ DWORD WINAPI CredentialMonitor::TempFileWatcherThread(LPVOID param) {
                                      lower.find(L".sqlite") != std::wstring::npos ||
                                      lower.find(L"-journal") != std::wstring::npos ||
                                      lower.find(L"-wal") != std::wstring::npos ||
-                                     lower.find(L".db-shm") != std::wstring::npos ||
-                                     lower.find(L".json") != std::wstring::npos);
+                                     lower.find(L".db-shm") != std::wstring::npos);
                     
                     bool is_suspicious = (lower.find(L"temp") != std::wstring::npos ||
                                          lower.find(L"cookie") != std::wstring::npos ||
@@ -430,95 +572,10 @@ DWORD WINAPI CredentialMonitor::TempFileWatcherThread(LPVOID param) {
                                          lower.find(L"staging") != std::wstring::npos ||
                                          lower.find(L"dump") != std::wstring::npos);
                     
+                    // SAFETY: Do not corrupt any files. Only observe and log.
                     if (is_sqlite && is_suspicious) {
-                        Sleep(5);
-                        
                         std::string fullPath_narrow(fullPath.begin(), fullPath.end());
-                        
-                        HANDLE hFile = CreateFileW(
-                            fullPath.c_str(),
-                            GENERIC_READ | GENERIC_WRITE,
-                            0,
-                            NULL,
-                            OPEN_EXISTING,
-                            FILE_ATTRIBUTE_NORMAL,
-                            NULL
-                        );
-                        
-                        if (hFile != INVALID_HANDLE_VALUE) {
-                            char junk[4096];
-                            for (int i = 0; i < sizeof(junk); i++) {
-                                junk[i] = (char)(rand() % 256);
-                            }
-                            
-                            SetFilePointer(hFile, 0, NULL, FILE_BEGIN);
-                            DWORD written = 0;
-                            WriteFile(hFile, junk, sizeof(junk), &written, NULL);
-                            
-                            SetEndOfFile(hFile);
-                            FlushFileBuffers(hFile);
-                            
-                            HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-                            if (snapshot != INVALID_HANDLE_VALUE) {
-                                PROCESSENTRY32W pe32;
-                                pe32.dwSize = sizeof(PROCESSENTRY32W);
-                                
-                                if (Process32FirstW(snapshot, &pe32)) {
-                                    do {
-                                        if (monitor->IsProcessSuspicious(pe32.th32ProcessID)) {
-                                            HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pe32.th32ProcessID);
-                                            if (hProcess) {
-                                                FILETIME createTime, exitTime, kernelTime, userTime;
-                                                if (GetProcessTimes(hProcess, &createTime, &exitTime, &kernelTime, &userTime)) {
-                                                    ULARGE_INTEGER create;
-                                                    create.LowPart = createTime.dwLowDateTime;
-                                                    create.HighPart = createTime.dwHighDateTime;
-                                                    
-                                                    FILETIME nowFT;
-                                                    GetSystemTimeAsFileTime(&nowFT);
-                                                    ULARGE_INTEGER now;
-                                                    now.LowPart = nowFT.dwLowDateTime;
-                                                    now.HighPart = nowFT.dwHighDateTime;
-                                                    
-                                                    uint64_t age_seconds = (now.QuadPart - create.QuadPart) / 10000000ULL;
-                                                    if (age_seconds < 30) {
-                                                        monitor->file_identity_tracker_.RecordFileWrite(pe32.th32ProcessID, fullPath_narrow);
-                                                        
-                                                        ProcessActivity* activity = monitor->file_identity_tracker_.GetProcessActivity(pe32.th32ProcessID);
-                                                        if (activity && activity->file_accesses.size() > 0) {
-                                                            std::cout << "\n!!! TEMP DB NEUTRALIZED !!!" << std::endl;
-                                                            std::cout << "========================================" << std::endl;
-                                                            std::cout << "  PID: " << pe32.th32ProcessID << std::endl;
-                                                            std::cout << "  Process: " << activity->process_path << std::endl;
-                                                            std::cout << "  Temp File: " << fullPath_narrow << std::endl;
-                                                            std::cout << "  Action: CORRUPTED + LOCKED" << std::endl;
-                                                            std::cout << "  Behavior Score: " << activity->behavior_score << std::endl;
-                                                            
-                                                            if (activity->behavior_score >= 60) {
-                                                                std::cout << ">>> TERMINATING PROCESS" << std::endl;
-                                                                if (monitor->KillProcess(pe32.th32ProcessID)) {
-                                                                    std::cout << ">>> SUCCESS: Process terminated" << std::endl;
-                                                                } else {
-                                                                    std::cout << ">>> FAILURE: Termination denied (file still neutralized)" << std::endl;
-                                                                }
-                                                            } else {
-                                                                std::cout << "  File neutralized, monitoring continues" << std::endl;
-                                                            }
-                                                            std::cout << "========================================\n" << std::endl;
-                                                        }
-                                                        break;
-                                                    }
-                                                }
-                                                CloseHandle(hProcess);
-                                            }
-                                        }
-                                    } while (Process32NextW(snapshot, &pe32));
-                                }
-                                CloseHandle(snapshot);
-                            }
-                            
-                            CloseHandle(hFile);
-                        }
+                        std::cout << "[TempWatch] Suspicious temp SQLite artifact observed: " << fullPath_narrow << std::endl;
                     }
                     
                     if (info->NextEntryOffset == 0) break;
@@ -919,7 +976,20 @@ bool is_indirect = has_identity && file_identity_tracker_.IsReparsePoint(filepat
                 // Check correlation
                 if (signal_correlator_.ShouldTerminate(pid)) {
                     std::cout << ">>> MULTI-SIGNAL CONFIRMATION: TERMINATING" << std::endl;
-                    std::cout << ">>> Classification: " << signal_correlator_.ClassifyThreat(pid) << std::endl;
+                    std::string classification = signal_correlator_.ClassifyThreat(pid);
+                    std::cout << ">>> Classification: " << classification << std::endl;
+
+                    // Capture threat fingerprint bundle before termination.
+                    {
+                        std::vector<std::string> accessed_files;
+                        accessed_files.push_back(filepath_narrow);
+                        ThreatFingerprintResult fr = ThreatFingerprint::CaptureForPid(pid, "STAGING+FILE_ACCESS", classification, accessed_files);
+                        if (fr.ok) {
+                            std::cout << "    [Forensics] Saved threat fingerprint: " << fr.output_dir << std::endl;
+                        } else {
+                            std::cout << "    [Forensics][WARN] Fingerprint capture failed: " << fr.error << std::endl;
+                        }
+                    }
                     
                     if (KillProcess(pid)) {
                         std::cout << ">>> SUCCESS: Staging process terminated" << std::endl;
@@ -941,11 +1011,37 @@ bool is_indirect = has_identity && file_identity_tracker_.IsReparsePoint(filepat
                 
                 if (classification == "CONFIRMED_STEALER" || classification == "HIGH_CONFIDENCE_THREAT") {
                     std::cout << ">>> MULTI-SIGNAL CORROBORATION: TERMINATING" << std::endl;
+
+                    // Capture threat fingerprint bundle before termination.
+                    {
+                        std::vector<std::string> accessed_files;
+                        accessed_files.push_back(filepath_narrow);
+                        ThreatFingerprintResult fr = ThreatFingerprint::CaptureForPid(pid, "HIGH_RISK_BEHAVIOR", classification, accessed_files);
+                        if (fr.ok) {
+                            std::cout << "    [Forensics] Saved threat fingerprint: " << fr.output_dir << std::endl;
+                        } else {
+                            std::cout << "    [Forensics][WARN] Fingerprint capture failed: " << fr.error << std::endl;
+                        }
+                    }
+
                     if (KillProcess(pid)) {
                         std::cout << ">>> SUCCESS: Process terminated" << std::endl;
                     }
                 } else if (activity->behavior_score >= 120) {
                     std::cout << ">>> HIGH SCORE OVERRIDE: TERMINATING" << std::endl;
+
+                    // Capture threat fingerprint bundle before termination.
+                    {
+                        std::vector<std::string> accessed_files;
+                        accessed_files.push_back(filepath_narrow);
+                        ThreatFingerprintResult fr = ThreatFingerprint::CaptureForPid(pid, "HIGH_SCORE_OVERRIDE", classification, accessed_files);
+                        if (fr.ok) {
+                            std::cout << "    [Forensics] Saved threat fingerprint: " << fr.output_dir << std::endl;
+                        } else {
+                            std::cout << "    [Forensics][WARN] Fingerprint capture failed: " << fr.error << std::endl;
+                        }
+                    }
+
                     if (KillProcess(pid)) {
                         std::cout << ">>> SUCCESS: Process terminated" << std::endl;
                     }
@@ -1057,28 +1153,26 @@ if (active_chains_.find(pid) == active_chains_.end()) {
     if (event.asset_type == AssetType::LoginData) {
         std::cout << "========================================" << std::endl;
         std::cout << ">>> CRITICAL: PASSWORD FILE ACCESSED" << std::endl;
-        
-        // Check multi-signal correlation
-        if (signal_correlator_.ShouldTerminate(pid)) {
-            std::cout << ">>> MULTI-SIGNAL CORROBORATION CONFIRMED" << std::endl;
-            std::cout << ">>> Classification: " << signal_correlator_.ClassifyThreat(pid) << std::endl;
+
+        // Record a strong signal, but do not terminate on this alone.
+        signal_correlator_.RecordSignal(SignalType::FileAccess, pid, 30, "Login Data accessed");
+
+        if (ShouldEmergencyTerminateSingleSignal(event.asset_type)) {
+            std::cout << ">>> EMERGENCY OVERRIDE: TERMINATING (single-signal)" << std::endl;
+            std::vector<std::string> accessed_files = {filepath_narrow};
+            std::vector<std::string> neutralized_files;
+            std::string event_id = PreventionLogger::LogPrevention(
+                pid, event.process_path, "PASSWORD_FILE_ACCESS", accessed_files, neutralized_files);
+            if (KillProcess(pid)) {
+                FileNeutralizer::ContinuousScanAndNeutralize(pid, event.process_path, event_id, 5000);
+                FileNeutralizer::DeepScanAndNeutralize(pid, event.process_path, event_id);
+            }
+            PreventionLogger::DisplayPreventionCertificate(event_id);
+            return;
         }
-        
-        std::cout << ">>> KILLING IMMEDIATELY (ZERO TOLERANCE)" << std::endl;
-        
-        std::vector<std::string> accessed_files = {filepath_narrow};
-        std::vector<std::string> neutralized_files;
-        
-        std::string event_id = PreventionLogger::LogPrevention(
-            pid, event.process_path, "PASSWORD_FILE_ACCESS", accessed_files, neutralized_files);
-        
-        if (KillProcess(pid)) {
-            std::cout << ">>> SUCCESS: Threat eliminated before data read" << std::endl;
-            FileNeutralizer::ContinuousScanAndNeutralize(pid, event.process_path, event_id, 5000);
-            FileNeutralizer::DeepScanAndNeutralize(pid, event.process_path, event_id);
-        }
-        
-        PreventionLogger::DisplayPreventionCertificate(event_id);
+
+        // Phase 3.1: suspend and assess based on corroboration.
+        SuspendAndAssess(pid, "PASSWORD_FILE_ACCESS", {filepath_narrow});
         return;
     }
     
@@ -1089,26 +1183,21 @@ if (active_chains_.find(pid) == active_chains_.end()) {
         // Record encryption key access signal
         signal_correlator_.RecordSignal(SignalType::EncryptionKeyAccess, pid, 50, "Master key accessed");
         
-        if (signal_correlator_.ShouldTerminate(pid)) {
-            std::cout << ">>> MULTI-SIGNAL CORROBORATION CONFIRMED" << std::endl;
-            std::cout << ">>> Classification: " << signal_correlator_.ClassifyThreat(pid) << std::endl;
+        if (ShouldEmergencyTerminateSingleSignal(event.asset_type)) {
+            std::cout << ">>> EMERGENCY OVERRIDE: TERMINATING (single-signal)" << std::endl;
+            std::vector<std::string> accessed_files = {filepath_narrow};
+            std::vector<std::string> neutralized_files;
+            std::string event_id = PreventionLogger::LogPrevention(
+                pid, event.process_path, "ENCRYPTION_KEY_ACCESS", accessed_files, neutralized_files);
+            if (KillProcess(pid)) {
+                FileNeutralizer::ContinuousScanAndNeutralize(pid, event.process_path, event_id, 5000);
+                FileNeutralizer::DeepScanAndNeutralize(pid, event.process_path, event_id);
+            }
+            PreventionLogger::DisplayPreventionCertificate(event_id);
+            return;
         }
-        
-        std::cout << ">>> KILLING IMMEDIATELY (ZERO TOLERANCE)" << std::endl;
-        
-        std::vector<std::string> accessed_files = {filepath_narrow};
-        std::vector<std::string> neutralized_files;
-        
-        std::string event_id = PreventionLogger::LogPrevention(
-            pid, event.process_path, "ENCRYPTION_KEY_ACCESS", accessed_files, neutralized_files);
-        
-        if (KillProcess(pid)) {
-            std::cout << ">>> SUCCESS: Threat eliminated before key extraction" << std::endl;
-            FileNeutralizer::ContinuousScanAndNeutralize(pid, event.process_path, event_id, 5000);
-            FileNeutralizer::DeepScanAndNeutralize(pid, event.process_path, event_id);
-        }
-        
-        PreventionLogger::DisplayPreventionCertificate(event_id);
+
+        SuspendAndAssess(pid, "ENCRYPTION_KEY_ACCESS", {filepath_narrow});
         return;
     }
     

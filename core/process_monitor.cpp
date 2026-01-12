@@ -54,9 +54,9 @@ void ProcessMonitor::Update() {
     }
     
     auto now = std::chrono::system_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last_update_).count();
+    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_update_).count();
     
-    if (elapsed >= 5) {
+    if (elapsed_ms >= 500) {
         ScanForNewProcesses();
         ScanForBrowserProcesses();
         UpdateProcessStates();

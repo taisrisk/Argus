@@ -323,6 +323,80 @@ bool ThreatFingerprint::IsKnownBadSha256(const std::string& sha256) {
     return std::find(hashes.begin(), hashes.end(), sha256) != hashes.end();
 }
 
+bool ThreatFingerprint::LoadThreatSummary(const std::string& sha256, std::string& out_summary) {
+    out_summary.clear();
+    if (sha256.size() != 64) return false;
+
+    std::string metaPath = std::string("threats/") + sha256 + "/meta.json";
+    std::ifstream f(metaPath, std::ios::in | std::ios::binary);
+    if (!f) return false;
+
+    std::string json((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+    if (json.empty()) return false;
+
+    auto extractString = [&](const char* key) -> std::string {
+        std::string k = std::string("\"") + key + "\"";
+        size_t kp = json.find(k);
+        if (kp == std::string::npos) return "";
+        size_t colon = json.find(':', kp);
+        if (colon == std::string::npos) return "";
+        size_t q1 = json.find('"', colon);
+        if (q1 == std::string::npos) return "";
+        size_t q2 = json.find('"', q1 + 1);
+        if (q2 == std::string::npos) return "";
+        return json.substr(q1 + 1, q2 - q1 - 1);
+    };
+
+    auto extractPid = [&]() -> std::string {
+        std::string k = "\"pid\"";
+        size_t kp = json.find(k);
+        if (kp == std::string::npos) return "";
+        size_t colon = json.find(':', kp);
+        if (colon == std::string::npos) return "";
+        size_t start = json.find_first_of("0123456789", colon);
+        if (start == std::string::npos) return "";
+        size_t end = json.find_first_not_of("0123456789", start);
+        return json.substr(start, end - start);
+    };
+
+    std::string reason = extractString("reason");
+    std::string classification = extractString("classification");
+    std::string image_path = extractString("image_path");
+    std::string pid = extractPid();
+
+    std::ostringstream oss;
+    oss << "Known threat fingerprint matched\n";
+    oss << "  sha256: " << sha256 << "\n";
+    if (!pid.empty()) oss << "  last_seen_pid: " << pid << "\n";
+    if (!classification.empty()) oss << "  classification: " << classification << "\n";
+    if (!reason.empty()) oss << "  reason: " << reason << "\n";
+    if (!image_path.empty()) oss << "  image_path: " << image_path << "\n";
+
+    // Best-effort: count accessed_files entries.
+    size_t af = json.find("\"accessed_files\"");
+    if (af != std::string::npos) {
+        size_t lb = json.find('[', af);
+        size_t rb = (lb != std::string::npos) ? json.find(']', lb) : std::string::npos;
+        if (lb != std::string::npos && rb != std::string::npos && rb > lb) {
+            std::string arr = json.substr(lb + 1, rb - lb - 1);
+            size_t count = 0;
+            for (size_t p = 0; (p = arr.find('"', p)) != std::string::npos; ) {
+                size_t q = arr.find('"', p + 1);
+                if (q == std::string::npos) break;
+                ++count;
+                p = q + 1;
+            }
+            // Each string contributes 2 quotes.
+            if (count >= 2) {
+                oss << "  accessed_files_count: " << (count / 2) << "\n";
+            }
+        }
+    }
+
+    out_summary = oss.str();
+    return true;
+}
+
 ThreatFingerprintResult ThreatFingerprint::CaptureForPid(uint32_t pid,
                                                         const std::string& reason,
                                                         const std::string& classification,

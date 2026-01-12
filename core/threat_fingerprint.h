@@ -46,6 +46,10 @@ public:
 
     static bool IsKnownBadSha256(const std::string& sha256);
 
+    // Loads a short human-readable summary for a known threat hash from threats/<sha256>/meta.json.
+    // Best-effort, dependency-free parsing.
+    static bool LoadThreatSummary(const std::string& sha256, std::string& out_summary);
+
 private:
     static std::wstring GetProcessImagePathW(uint32_t pid, std::string& out_error);
     static bool EnsureDir(const std::wstring& path, std::string& out_error);

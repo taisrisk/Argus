@@ -292,6 +292,7 @@ if (!SetConsoleCtrlHandler(ConsoleHandler, TRUE)) {
         credential_monitor.Update();
 
         // Instant-kill known threats (opt-in): check newly started processes against threats/ fingerprints.
+        // NOTE: ConsumeNewProcesses() is populated by ProcessMonitor::Update() on its scan interval.
         if (instant_kill_known_threats) {
             auto new_procs = process_monitor.ConsumeNewProcesses();
             for (const auto& p : new_procs) {
@@ -316,6 +317,18 @@ if (!SetConsoleCtrlHandler(ConsoleHandler, TRUE)) {
                 if (argus::ThreatFingerprint::IsKnownBadSha256(sha)) {
                     logger.Log(argus::LogLevel::Warning,
                                std::string("[InstantKill] Known threat hash match: ") + sha + " pid=" + std::to_string(p.pid));
+
+                    std::string summary;
+                    if (!argus::ThreatFingerprint::LoadThreatSummary(sha, summary)) {
+                        summary = "Known threat fingerprint matched\n";
+                        summary += "  sha256: " + sha + "\n";
+                    }
+
+                    std::cout << "\n[AUTO-BLOCKED] Prevented known threat from running\n"
+                              << summary
+                              << "  current_pid: " << p.pid << "\n"
+                              << "  current_image_path: " << p.image_path << "\n"
+                              << std::endl;
                     // Best-effort: terminate immediately.
                     credential_monitor.KillProcess(p.pid);
                 }
